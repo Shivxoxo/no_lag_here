@@ -1,12 +1,14 @@
 # RIDGE RUSH — *Master the Mountains*
 
 An original 2D physics hill-climbing driving game for the browser, built with vanilla JavaScript,
-HTML5 Canvas, CSS and the Web Audio API. No frameworks, no build step, no backend, and no image
-or audio files: all art is drawn procedurally and all sound and music is synthesized at runtime.
+HTML5 Canvas, CSS and the Web Audio API. No frameworks, no build step, no backend, and no bitmap
+or audio assets (only a small SVG favicon): all art is drawn procedurally and all sound and music is
+synthesized at runtime.
 
 Drive six original vehicles across endless, seeded, procedurally generated terrain in eight worlds.
 Collect coins and fuel, land flips, chain combos, survive telegraphed hazards, conquer boss climbs,
-complete daily missions and challenges, and spend your earnings on upgrades, vehicles, worlds and paint.
+complete daily missions and challenges, spend your earnings on upgrades, vehicles and worlds, and unlock
+paint jobs by levelling up.
 
 ---
 
@@ -31,8 +33,9 @@ npm test                 # node unit tests for every module (tests/*.test.js)
 npm run smoke            # Playwright end-to-end suite, run against both file:// and http
 ```
 
-The smoke suite expects Playwright to be resolvable (for example
-`NODE_PATH=/path/to/global/node_modules`) and a Chromium build installed for Playwright.
+The smoke suite needs Playwright and a Chromium build installed for it. `npm run smoke` looks for
+Playwright in `$NODE_PATH`, or in the global `node_modules` (`npm root -g`) when `NODE_PATH` is unset;
+to use another install, run `NODE_PATH=/path/to/node_modules node tests/smoke.js`.
 
 ---
 
@@ -45,7 +48,7 @@ The smoke suite expects Playwright to be resolvable (for example
 | Lean back: nose up, rotate counter-clockwise | **W** / **↑** | **TILT ↺** |
 | Lean forward: nose down, rotate clockwise | **S** / **↓** | **TILT ↻** |
 | Emergency brake, or the Storm Runner's **Ion Thruster** | **Space** | **SPECIAL** (Storm Runner only) |
-| Restart (after a crash, while paused, on results) | **R** | pause menu → RESTART |
+| Restart (any time; a live run is banked first) | **R** | pause menu → RESTART |
 | Pause / back | **P** / **Esc** | ❚❚ button (top-right) |
 | Mute / unmute | **M** | Settings |
 
@@ -89,7 +92,7 @@ js/game/
   tricks.js             RR.Tricks: flip / air / wheelie / perfect-landing detection, combos
   events.js             RR.EventSystem: random events, hazards, world sections, boss rewards
   renderer.js           RR.Renderer: frame composition, terrain art, decorations, lighting, overlays
-  run.js                RR.Run: one gameplay session (fixed-step simulation, fuel, crashes, rewards)
+  run.js                RR.Run: one gameplay session (semi-fixed-step simulation, fuel, crashes, rewards)
 js/ui/
   hud.js                RR.HUD: in-run heads-up display
   screens.js            RR.UI: menu, vehicle select, garage, worlds, missions, daily, settings,
@@ -125,8 +128,9 @@ A custom lightweight rigid-body solver built for a chassis on two sprung wheels 
 - **Crash detection:** the driver's head touching ground, a ceiling or lava, or the car being stuck
   on its roof or tail.
 
-The simulation runs at a fixed 120 Hz with an accumulator. Rendering interpolates between physics
-states, so motion stays smooth at any refresh rate.
+Physics uses a semi-fixed timestep: each frame's (time-scaled) dt is split into n equal sub-steps of at
+most 1/120 s (capped at MAX_SUBSTEPS), so every rendered frame shows the exact simulated pose at any
+refresh rate. There is no accumulator and no interpolation.
 
 ### Procedural terrain (`js/game/terrain.js`)
 - **Generation:** a seeded pattern generator writes 64 m chunks ahead of the camera and trims behind
@@ -135,7 +139,7 @@ states, so motion stays smooth at any refresh rate.
 - **Difficulty:** it ramps with distance, bringing more gaps and steeper climbs later.
 - **Always playable:** every gap and lava jump passes a ballistic check against reachable speed.
   Slopes are clamped, tight dips are smoothed out, and trench exits are always climbable.
-- **Major sections** arrive every 2–3 km: **THE CANYON**, **THE STORM**, **THE CAVE**
+- **Major sections:** the first arrives at 1.2–1.8 km, then every 2–3 km: **THE CANYON**, **THE STORM**, **THE CAVE**
   (with a ceiling and darkness), **THE VOLCANO** and **THE MOON** (low gravity).
 - **Boss runs** come at 3 km and then every 5 km: an extreme climb (*THE MOUNTAIN GIANT* and one
   per world) with a summit reward of coins, XP and a vehicle-unlock token.
@@ -154,8 +158,9 @@ suspension, air control, fuel use and stability:
 | **Storm Runner** | futuristic, fastest; **Ion Thruster** special |
 
 Seven upgrade categories (**ENGINE, SUSPENSION, TIRES, FUEL, GRIP, AIR CONTROL, BRAKES**) each have
-10 levels. Every level changes the real physics parameters, and the garage shows the current and
-next-level values.
+10 levels. Every level changes the real physics parameters. The garage headlines each upgrade in
+player terms (top speed, landing softness, snow grip, seconds of fuel, climbable slope, flip speed,
+stopping power) with the current and next-level values, and the technical numbers in small print.
 
 ### Worlds (`js/data/worlds.js`)
 **Green Valley, Rocky Highlands, Desert Canyon, Snow Peaks, Volcanic Ridge, Moon Base, Neon City,
@@ -168,7 +173,8 @@ Storm Planet.** Each world has its own:
 - difficulty and coin multiplier
 
 Examples: snow and ice are slippery, volcanic ground has lava, the Moon has 0.42 g, Neon City has
-launch pads, moving ramps and drones, and Storm Planet has hurricane gusts and lightning.
+launch pads, moving ramps and drones, and Storm Planet has hurricane gusts and lightning. Gusts are
+capped (and a strong headwind is announced with a HEADWIND! warning) so a car can always push through.
 
 ### Gameplay loop (`js/game/run.js`, `collectibles.js`, `powerups.js`, `tricks.js`, `events.js`)
 - **Fuel** drains while you drive. Pick up **fuel cans** (full), **energy cells** (+35 %) and rare
@@ -185,7 +191,9 @@ launch pads, moving ramps and drones, and Storm Planet has hurricane gusts and l
 - **Random events** are always telegraphed at least 1.5 s ahead with a HUD warning and a world
   marker: falling rocks, eagle coin drops, coin storms, fuel bonus zones, wind gusts, steep-climb
   alerts, meteor showers (Moon), lava eruptions (Volcanic), moving ramps and drones (Neon City),
-  and lightning (Storm Planet).
+  and lightning (Storm Planet). Hazards are aimed so a car holding its speed is safe: falling rocks
+  land before it arrives (only a rock still falling is lethal; a landed one is an obstacle), and
+  lava vents and meteors miss it.
 
 ### Progression (`js/systems/*`, `js/core/save.js`)
 - **XP and levels:** XP comes from distance, coins, tricks, bosses, records, missions and daily
@@ -195,7 +203,8 @@ launch pads, moving ramps and drones, and Storm Planet has hurricane gusts and l
   token rewards plus an all-complete bonus.
 - **Daily Challenge:** seeded by the date, so everyone gets the same challenge on the same day.
   Modifiers include low gravity, no fuel pickups, max speed, extreme hills, ice, coin rush, gale
-  winds, heavy gravity and chaos.
+  winds, heavy gravity and chaos. The HUD shows the day's modifiers under the GOAL, a gold GOAL flag
+  marks the target in the world, and the Black Ice challenge glazes the ground with ice.
 - **Save:** everything persists in one structured `localStorage` object. It is sanitized on load,
   backed up, recovered gracefully if corrupted, and can be wiped with **RESET SAVE DATA** (with a
   confirmation step).
@@ -215,8 +224,11 @@ launch pads, moving ramps and drones, and Storm Planet has hurricane gusts and l
 ---
 
 ## Settings
-Music, sound effects, graphics quality (LOW / MEDIUM / HIGH), control sensitivity, reduced motion,
-FPS counter, touch controls (Auto / On / Off), and RESET SAVE DATA.
+Music, sound effects, graphics quality (AUTO / LOW / MEDIUM / HIGH; AUTO and every fixed level also use
+dynamic resolution, which lowers the render scale when frames are slow and steps back up when they recover;
+AUTO may also lower the quality level), control sensitivity, reduced motion, FPS counter (it also shows the
+render scale when below 100 %, and the rendered quality in AUTO), touch controls (Auto / On / Off), and
+RESET SAVE DATA.
 
 ---
 

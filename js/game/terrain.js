@@ -127,8 +127,9 @@
   const SECTION_IDS = ['canyon', 'storm', 'cave', 'volcano', 'moon'];
   const TYPES = ['rolling', 'hills', 'valley', 'climb', 'descent', 'jump', 'gap', 'rocks', 'plateau',
     'lava', 'bouncepad', 'boostpad'];
-  const FRONT_OK = ['rock', 'bush', 'flowers', 'tumbleweed', 'snow_mound', 'crystal', 'alien_plant', 'bones',
-    'lava_rock', 'ice_crystal', 'cairn'];
+  // Front-layer decorations are drawn over the car: low props only (qa2-10 — crystals, ice crystals, cairns and
+  // alien plants reach cab height and hid the car on ~5 % of the track; they stay in the back layer).
+  const FRONT_OK = ['rock', 'bush', 'flowers', 'tumbleweed', 'snow_mound', 'bones', 'lava_rock'];
   const CAVE_OK = ['rock', 'boulder', 'crystal', 'lava_rock', 'ice_crystal', 'cairn'];
 
   // Terrain "styles": normal ground and per-section shaping.

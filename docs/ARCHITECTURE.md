@@ -1,5 +1,9 @@
 # RIDGE RUSH — Architecture & Module Contracts
 
+> **Note:** this is the original design contract. The implemented APIs and tuning differ in places;
+> `docs/INTEGRATION_NOTES.md` (incl. the "Review / fix pass" and "Second QA pass" sections) and the header
+> comments of each js file are authoritative where they disagree.
+
 > "Master the Mountains" — an original 2D physics hill-climbing driving game for the browser.
 > This document is the **binding contract** between modules. Every file listed here is owned by
 > exactly one author; cross-module calls MUST use only the APIs defined here. If you must deviate,
@@ -24,7 +28,8 @@
 - **Units**: meters, seconds, radians, kilograms, Newtons. **World space is y-UP** (positive y = up).
   Angles are **counter-clockwise positive**. Chassis angle 0 = level, facing +x. Driving forward = +x.
   Distance shown to the player = meters travelled in +x from the start (x = 0).
-- Fixed physics timestep `RR.CONST.PHYS_DT` (1/120 s), accumulator, max `RR.CONST.MAX_SUBSTEPS` per frame.
+- Semi-fixed physics timestep: each frame's dt is split into n = ceil(dt / PHYS_DT) equal sub-steps
+  (`RR.CONST.PHYS_DT` = 1/120 s, n ≤ `RR.CONST.MAX_SUBSTEPS`); no accumulator, no interpolation.
   Frame dt clamped to `RR.CONST.MAX_FRAME_DT` (0.05 s).
 - Guard every simulation number: `Number.isFinite`, clamp speeds / angular velocity, never let NaN reach
   rendering or the save file.
@@ -205,7 +210,7 @@ Save shape (exact field names):
 ### 4.2 `RR.Progression` — `js/systems/progression.js`
 ```
 MAX_LEVEL = 50
-xpForLevel(level)        // XP to go level→level+1 = Math.round(200 * Math.pow(level, 1.4) / 10) * 10
+xpForLevel(level)        // XP to go level→level+1 = Math.round(150 * Math.pow(level, 1.55) / 10) * 10
 levelInfo(totalXp?)      // → {level, xpInto, xpNext, progress 0..1} (defaults to save.xp)
 addXp(n)                 // → {levelsGained, level, rewards[]}; updates save.xp/level; unlocks level cosmetics;
                          //   emits 'levelup' per level gained; saves
@@ -229,8 +234,11 @@ computeRunRewards(summary)     // → { coins, bonusCoins, totalCoins, tokens,
 applyRunResults(summary)       // computes rewards, adds coins/tokens/xp, updates bests & stats, saves.
                                //   → rewards + { levelUp: {levelsGained, level, rewards[]} }
 ```
-XP rules: distance `floor(m/10)`, coins `floor(totalCoins/25)`, tricks `summary.trickXp`, boss
-`summary.bossXp`, record `+250` for a new world best ≥ 100 m. Attract/menu runs never grant anything.
+XP rules: distance `floor(m/10)`; coins `floor(pickupCoins/25)`; tricks
+`min(floor(0.5·trickXp), floor(1.5·distanceXp))`; boss `summary.bossXp`; record
+`min(250, floor(0.5·(distance − previousBest)))` for a new world best (previous best ≥ `RECORD_MIN_PREV` 50 m,
+distance ≥ `RECORD_MIN_DISTANCE` 100 m). Dailies never set world records. Attract/menu runs never grant
+anything.
 
 ### 4.3 `RR.MissionTemplates` + `RR.Missions`
 Stat keys (exact) passed to `RR.Missions.track(stat, value, ctx)`:
@@ -262,8 +270,10 @@ RR.Daily.getChallenge(day?)  // deterministic from the date → DailyChallenge
   Challenge ids (≥ 7): low_gravity, no_fuel, max_speed, extreme_hills, ice, coin_rush, storm_winds.
   no_fuel must stay beatable (e.g. fuelEfficiencyMul 0.45 + moderate target).
 RR.Daily.status()            // → {day, best, attempts, completed} (resets when the day changed)
-RR.Daily.recordAttempt(distance) // → {completedNow, best, reward|null}; first completion grants reward
-                                 //   via Progression and tracks mission 'dailyComplete'; saves
+RR.Daily.recordAttempt(distance, day?, now?) // → {completedNow, expired, best, reward|null, attempts,
+                                 //   target, levelUp|null}; day = the challenge day the run started for.
+                                 //   First completion grants the reward via Progression and tracks mission
+                                 //   'dailyComplete'; saves. A run whose day is not today is expired.
 RR.Daily.timeUntilNext()     // ms
 ```
 The daily world is playable even if the player hasn't unlocked it (it's a teaser).
@@ -383,8 +393,12 @@ RR.Background.drawThumbnail(ctx, w, h, world)  // static; world-card preview
 ### 5.7 `RR.Renderer` — `js/game/renderer.js`
 ```
 new RR.Renderer(canvas); r.ctx, r.w, r.h (CSS px), r.dpr
-r.resize()           // backing store = CSS size × dpr (dpr cap: low 1, medium 1.5, high 2)
-r.setQuality(q)
+r.resize()           // backing store = CSS size × dpr (dpr cap: low 1, medium 1.25, high 2; × render scale)
+r.setQuality(q)      // 'low' | 'medium' | 'high' | 'auto'
+// implemented additions (see INTEGRATION_NOTES): r.setAutoQuality(on), r.reportFrameTime(ms),
+// r.frameStats(), r.nudgeUp(), r.flushResize(), r.suggestedQuality, r.onQualityHint(q) — dynamic
+// resolution; RR.Renderer.worldColors(world, ice?). Camera / terrain API additions are listed in
+// INTEGRATION_NOTES rather than duplicated here.
 r.worldTransform(camera)   // ctx.setTransform(dpr*z, 0, 0, -dpr*z, dpr*(w/2 - (cx)*z), dpr*(h/2 + (cy)*z))
 r.screenTransform()        // ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 r.drawRun(run)             // full frame (order below)

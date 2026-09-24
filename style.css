@@ -653,6 +653,7 @@ input[type="range"]:focus-visible { outline: 2px solid #fff; outline-offset: 4px
 .pips i.on { background: linear-gradient(180deg, #ffd65a, var(--accent)); box-shadow: 0 0 6px rgba(255, 150, 40, 0.5); }
 .pips i.tier-lock:not(.on) { background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0 3px, rgba(255, 255, 255, 0.02) 3px 6px); }
 .upg-stat { display: flex; align-items: center; gap: 0.3rem; font: 800 0.8rem var(--font-ui); font-variant-numeric: tabular-nums; min-width: 0; flex-wrap: wrap; }
+.upg-eff { color: var(--muted); margin-right: 0.15rem; }
 .upg-cur { color: #dfe7fb; }
 .upg-arrow { color: var(--accent2); display: inline-flex; }
 .upg-arrow .ic { width: 1em; height: 1em; stroke-width: 3; }
@@ -859,6 +860,9 @@ input[type="range"]:focus-visible { outline: 2px solid #fff; outline-offset: 4px
 }
 .screen.active .res-head { animation: stamp-in 0.55s var(--ease-back) both; }
 .res-reason { font: italic 800 0.95rem var(--font-ui); color: #ffc4cf; letter-spacing: 0.04em; }
+.res-coach { margin: 0.1rem 0 0; font: 700 max(10px, 0.82rem)/1.3 var(--font-ui); color: #ffe39a; text-align: center; }
+.res-coach[hidden] { display: none; }
+.trick-chips .empty { flex: 1 1 100%; }
 .res-record {
   display: none; align-items: center; gap: 0.4em;
   padding: 0.35em 1em; border-radius: 999px;
@@ -1019,6 +1023,8 @@ body[data-state="playing"] #toasts { top: auto; bottom: max(2rem, var(--safe-b))
 .hud-best-row .ic { width: 1em; height: 1em; color: var(--accent2); }
 .hud-best-label { letter-spacing: 0.1em; }
 .hud-best-row span:last-child { color: #fff; }
+.hud-mods { display: none; margin-top: 0.3rem; padding: 0.12rem 0.45rem; border-radius: 7px; background: rgba(79, 216, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(79, 216, 255, 0.45); font: 800 max(9px, 0.66rem)/1.2 var(--font-ui); color: #cdefff; letter-spacing: 0.03em; white-space: nowrap; text-align: center; }
+.hud-mods.on { display: block; }
 .hud-best-track { height: 0.22rem; margin-top: 0.3rem; border-radius: 1rem; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
 .hud-best-track i { display: block; height: 100%; transform-origin: left center; transform: scaleX(0); background: var(--accent2); }
 .hud-dist.record { border-color: rgba(255, 204, 51, 0.7); box-shadow: 0 0 18px rgba(255, 204, 51, 0.35); }
@@ -1065,6 +1071,9 @@ body[data-state="playing"] #toasts { top: auto; bottom: max(2rem, var(--safe-b))
 .hud-warning { display: none; align-items: center; gap: 0.45rem; padding: 0.4rem 0.9rem; border-radius: 12px; background: rgba(70, 6, 20, 0.8); border: 2px solid var(--danger); color: #fff; font: italic 900 0.9rem/1.1 var(--font-display); letter-spacing: 0.04em; text-align: center; box-shadow: 0 0 22px rgba(255, 79, 109, 0.45); }
 .hud-warning.on { display: inline-flex; animation: warn-pulse 0.55s ease-in-out infinite alternate; }
 .hud-warning .ic { width: 1.3em; height: 1.3em; color: #ffd0d8; flex: none; }
+.hud-warning-txt { display: flex; flex-direction: column; align-items: center; }
+.hud-warning-txt small { display: none; font: 700 max(10px, 0.62rem)/1.2 var(--font-ui); font-style: normal; letter-spacing: 0.02em; opacity: 0.92; margin-top: 0.12rem; }
+.hud-warning.has-sub .hud-warning-txt small { display: block; }
 .hud-warning.kind-bonus { background: rgba(70, 48, 0, 0.8); border-color: var(--gold); box-shadow: 0 0 22px rgba(255, 204, 51, 0.45); }
 .hud-warning.kind-bonus .ic { color: var(--gold); }
 .hud-warning.kind-info { background: rgba(0, 50, 48, 0.8); border-color: var(--accent2); box-shadow: 0 0 22px rgba(25, 211, 197, 0.4); }
@@ -1083,7 +1092,7 @@ body[data-state="playing"] #toasts { top: auto; bottom: max(2rem, var(--safe-b))
   border: 0; border-radius: 14px;
   background: rgba(8, 12, 26, 0.6); box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.22), 0 6px 16px rgba(0, 0, 0, 0.25);
   color: #fff; cursor: pointer; transition: background 0.15s, transform 0.1s;
-  touch-action: manipulation;
+  touch-action: none;   /* pauses on pointerup, also while another finger holds a pedal (qa2-5) */
 }
 .hud-pause:hover { background: rgba(255, 122, 26, 0.45); }
 .hud-pause:active { transform: scale(0.9); }
@@ -1186,7 +1195,7 @@ body[data-state="playing"] #toasts { top: auto; bottom: max(2rem, var(--safe-b))
 .tc-btn span { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
 .tc-big { width: max(84px, 6.3rem); height: max(84px, 6.3rem); font-size: 0.72rem; }
 .tc-small { width: max(72px, 4.9rem); height: max(72px, 4.9rem); }
-.tc-small span { font-size: 0.55rem; }
+.tc-small span { font-size: max(9px, 0.55rem); }
 .tc-gas { --tc: rgba(91, 227, 107, 0.85); background: radial-gradient(circle at 50% 35%, rgba(91, 227, 107, 0.32), rgba(10, 32, 16, 0.4) 70%); }
 .tc-brake { --tc: rgba(255, 79, 109, 0.85); background: radial-gradient(circle at 50% 35%, rgba(255, 79, 109, 0.32), rgba(36, 8, 14, 0.4) 70%); }
 .tc-rot { --tc: rgba(140, 170, 255, 0.75); }
@@ -1429,6 +1438,37 @@ body.touch-device .btn kbd { display: none; }
   .tc-small { width: 72px; height: 72px; }
   .tc-cluster { gap: 0.6rem; bottom: max(0.6rem, calc(var(--safe-b) + 0.3rem)); }
   .tc-special { right: calc(84px + 0.6rem); bottom: calc(72px + 0.6rem); }
+
+  /* qa2-6: px floors that do not shrink with the 11 px root — tap targets ≥ 40 px tall (swatches ≥ 32),
+     text ≥ 9 px. Rules below 0.65rem are always < 9 px here (root ≤ 14 px), so they get 9px directly. */
+  .btn, .btn-sm, .btn-back, .btn-upg, .btn-settings, .seg button, .sel-chip { min-height: 40px; }
+  .seg button { min-width: 40px; }
+  .pause-btns .btn { min-height: 44px; }
+  .arrow-btn, .arrow-btn.sm { width: 40px; height: 40px; }
+  .range-wrap input[type="range"] { min-height: 40px; }
+  .toggle { width: 48px; height: 30px; border-radius: 15px; }
+  .toggle i { top: 3px; left: 3px; width: 24px; height: 24px; }
+  .toggle[aria-checked="true"] i { transform: translateX(18px); }
+  .toggle::after { content: ""; position: absolute; inset: -6px; }     /* 60 × 42 hit area */
+  .swatch { width: max(32px, 1.9rem); height: max(32px, 1.9rem); flex: none; }
+  .swatches { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; padding: 4px 3px 6px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.25) transparent; }
+  .swatch:hover { transform: none; }
+  .sw-lock .ic { width: 12px; height: 12px; }
+  .sw-lock small, .hud-combo-txt small, .pause-stats small, .goal-box small, .hud-combo-txt em, .sel-chip small,
+  .veh-cycler small, .wc-text small, .stat-name, .veh-badge-sel, .veh-badge-special, .wc-badge-sel, .hud-meta small { font-size: 9px; }
+  .sw-lock small { margin-top: 0; letter-spacing: -0.02em; }
+  .diff-label, .tchip { font-size: max(9px, 0.66rem); }
+  .hud-fps, .lock-req, .lvl-xp, .mis-next small { font-size: max(9px, 0.68rem); }
+  .daily-date, .hud-best-row, .res-xp-break, .stat-tile small, .upg-detail, .upg-lv { font-size: max(9px, 0.7rem); }
+  .cref-title, .hud-boss-name, .hud-chip, .hud-meta, .mis-main small, .mod-chip, .pause-hint, .res-level-bar small,
+  .set-label small, .tc-big, kbd { font-size: max(9px, 0.72rem); }
+  .controls-ref li { font-size: max(9px, 0.74rem); }
+  .daily-done, .daily-world em, .garage-tip, .hud-lowfuel, .res-dist small, .ts-text small, .tut-title, .wc-req, .wc-sub,
+  .pm-row { font-size: max(9px, 0.76rem); }
+  .badge, .claimed-tag, .mis-bonus-main small, .rchip, .res-side h4, .seg button, .trick-chip, .veh-tag, .wc-best,
+  .btn-upg { font-size: max(9px, 0.78rem); }
+  .block-title, .block-title em, .btn-sm, .garage-name p, .hud-stamp-sub, .logo-sub, .lvl-cap, .res-best, .set-group h4,
+  .tut-tips li, .upg-stat, .veh-selected-tag, .res-best small { font-size: max(9px, 0.8rem); }
 }
 
 

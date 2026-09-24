@@ -29,6 +29,13 @@
  *  - RR.Renderer.drawDecoration(ctx, deco, world, t, zoom) — static painter (WORLD transform, y-up metres,
  *    deco {x, y, type, scale, variant}) shared with RR.Background.drawThumbnail.
  *  - RR.Renderer.DECORATION_TYPES — every decoration type with a dedicated painter.
+ *  - RR.Renderer.worldColors(world, ice?) — the cached palette; run.modifiers.frictionMul < 0.8 (Black Ice
+ *    daily) glazes every surface but lava with SURF.ice colours + ice-sheen detail (qa2-13).
+ *  - Daily runs (qa2-7): the record flag is labelled run.bestLabel ('BEST TODAY'); a gold GOAL banner stands at
+ *    run.daily.targetDistance until it is passed (not when today's challenge is already completed — read once
+ *    per run from RR.Daily.status()); within 4 m of the best flag only GOAL is drawn.
+ *  - Front decorations (drawn over the car) skip additive glows and fade to 35 % where they overlap the
+ *    car's x ± 2.2 m (qa2-10).
  *  - Reads (all optional): run.env.tint as a CSS colour string ('#rrggbb' → 18 % overlay, 'rgba(..)' used
  *    as-is) or {color, alpha}; run.specialActive / run.thrusterActive (bool) → ion thruster plume;
  *    run.boostActive or powerUps.isActive('boost') → boost flames; run.controls.throttle | run.throttle →
@@ -40,16 +47,24 @@
  *  - Backing store = CSS size × min(devicePixelRatio, cap) × renderScale; caps low 1 / medium 1.25 / high 2;
  *    LOW renders at renderScale 0.75. r.dpr is the EFFECTIVE backing ratio every transform uses (so
  *    canvas.width === round(r.w × r.dpr) always); r.deviceRatio = min(devicePixelRatio, cap).
- *  - Dynamic resolution (on by default): drawRun() keeps an EMA of the presented-frame interval; > 19 ms for
- *    2 s steps renderScale down (1 → 0.85 → 0.7, and on hi-DPI screens → 0.6 → 0.5 but never below 1 backing
- *    px per CSS px), < 15 ms for 5 s steps back up (the wait doubles, ≤ 60 s, when an upgrade is undone
- *    within 8 s). Gaps > 0.25 s are ignored. The canvas is resized only on a step change.
+ *  - Dynamic resolution (on by default), second QA pass (qa2-1/qa2-3): the monitor learns the display period v
+ *    (p10 of every 60 frame intervals, snapped to 240…30 Hz within 7 %, only ever lowered; reset on a DPR
+ *    change) and uses relative thresholds: EMA > max(1.2·v, v + 3 ms) for 2 s steps renderScale down
+ *    (1 → 0.85 → 0.7, and on hi-DPI screens → 0.6 → 0.5 but never below 1 backing px per CSS px, and never
+ *    below 0.7 effective backing px per CSS px — fixed LOW does not step), EMA < 1.08·v for 6 s probes one
+ *    step back up (the wait doubles, ≤ 60 s, when an upgrade is undone within 8 s). A step down is judged
+ *    after 3 s at the new step: no improvement (≥ 92 %) with the EMA within 10 % of a refresh period means a
+ *    capped display (30/40/50 Hz): the step is undone and v = that period — 30/50 Hz panels stay sharp.
+ *    Gaps > 0.25 s are ignored. Step changes resize the canvas right before the next draw (drawRun /
+ *    r.flushResize()), never after a drawn frame (that presented a black frame). r.nudgeUp() retries one
+ *    step higher (the Game calls it at every run start).
  *    r.setAutoQuality(bool), r.autoQuality, r.renderScale, r.frameStats() → {ema(ms), scale, step, quality,
- *    setting, dpr, auto, suggested}. r.reportFrameTime(ms) lets the Game feed its own rAF intervals (the
- *    internal timing then switches off). r.suggestedQuality: 'medium'/'low' when even the floor is too slow.
- *  - r.setQuality('auto'): HIGH that may also step its quality down (high → medium → low) after the scale
- *    ladder; r.quality is the quality actually rendered, r.qualitySetting what was asked. In 'auto' the
- *    renderer keeps run.background / run.particles on r.quality itself and calls r.onQualityHint(q) (optional).
+ *    setting, dpr, auto, suggested, vsync(ms)}. r.reportFrameTime(ms) lets the Game feed its own rAF intervals
+ *    (the internal timing then switches off). r.suggestedQuality: 'medium'/'low' when even the floor is too
+ *    slow although the last step down measurably helped (never for a capped display).
+ *  - r.setQuality('auto'): HIGH that may also step its quality down (high 1 → 0.85 → 0.75 → medium 0.85 →
+ *    low; never below LOW's 0.75 render scale); r.quality is the quality actually rendered, r.qualitySetting
+ *    what was asked. In 'auto' the renderer keeps run.background / run.particles on r.quality itself and calls r.onQualityHint(q) (optional).
  *    Re-applying the current quality is a no-op (the ladder is kept).
  *  - LOW darkness: one gradient box + solid fills on the main canvas (no offscreen light map / upscale blit).
  * Review fixes: the virtual wall left of terrain.minX is drawn as a rock cliff (visuals-1); MAGNET field
@@ -76,12 +91,30 @@
   const AUTO_STEPS = [
     { q: null, s: 1 }, { q: null, s: 0.85 }, { q: null, s: 0.7 }, { q: null, s: 0.6 }, { q: null, s: 0.5 }
   ];
+  // AUTO never renders below fixed LOW's 0.75 render scale (qa2-1).
   const AUTO_LADDER = [
-    { q: 'high', s: 1 }, { q: 'high', s: 0.85 }, { q: 'high', s: 0.7 },
-    { q: 'medium', s: 0.85 }, { q: 'low', s: 1 }, { q: 'low', s: 0.85 }
+    { q: 'high', s: 1 }, { q: 'high', s: 0.85 }, { q: 'high', s: 0.75 },
+    { q: 'medium', s: 0.85 }, { q: 'low', s: 1 }
   ];
-  const FT_SLOW = 0.019, FT_FAST = 0.015;   // EMA frame-interval thresholds (s)
-  const SLOW_HOLD = 2, FAST_HOLD = 5;       // seconds the EMA must stay past a threshold before a step
+  // Frame-interval thresholds are relative to the learned display period (qa2-1): a vsync-locked 60 Hz
+  // display reads ~16.7 ms, a 50 Hz panel 20 ms, a 30 fps cap 33.3 ms — none of those is "slow".
+  const REFRESH_HZ = [240, 165, 144, 120, 90, 75, 60, 50, 30];      // periods the ring estimate snaps to
+  const CAP_HZ = [240, 165, 144, 120, 90, 75, 60, 50, 40, 30];      // refresh caps a step-down may reveal
+  const VSYNC_DEFAULT = 1 / 60;             // display period until the first estimate
+  const RING_N = 60;                        // monitored intervals per display-period estimate
+  const SLOW_HOLD = 2, FAST_HOLD = 6;       // seconds past a threshold before a step (FAST_HOLD = first probe-up wait)
+  const CAP_MEASURE = 3;                    // seconds measured at a new (lower) step before judging it
+  const CAP_HOLD = 20;                      // s a detected refresh cap blocks lower ring estimates (doubles, ≤ 120)
+  // nearest period of `list` (Hz) to dt when within tol (relative), else 0
+  function snapPeriod(dt, list, tol) {
+    let best = 0, err = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const p = 1 / list[i], e = Math.abs(dt - p) / p;
+      if (e < err) { err = e; best = p; }
+    }
+    return err <= tol ? best : 0;
+  }
+  const rawDpr = () => (typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1);
   const EMPTY = Object.freeze({});
   // decoration types that are living plants / farm props — hidden inside a low-gravity MOON section
   const LIVING = Object.freeze({ tree: 1, bush: 1, flowers: 1, fence: 1, pine: 1, pine_snow: 1, cactus: 1, tumbleweed: 1 });
@@ -143,7 +176,22 @@
 
   // Per-world derived colours (cached by world object).
   const worldColorCache = new WeakMap();
-  function worldColors(world) {
+  // ice = Black Ice daily (run.modifiers.frictionMul < 0.8, qa2-13): every surface but lava is glazed with
+  // SURF.ice colours and draws the ice-sheen band detail (separate cache per world).
+  const iceColorCache = new WeakMap();
+  function worldColors(world, ice) {
+    if (ice && world && typeof world === 'object') {
+      let ic = iceColorCache.get(world);
+      if (ic) return ic;
+      const base = worldColors(world, false);
+      const surf = {};
+      for (const k of Object.keys(base.surf)) {
+        surf[k] = k === 'lava' ? base.surf[k] : { top: SURF.ice.top, dark: SURF.ice.dark, hi: SURF.ice.hi, band: base.surf[k].band };
+      }
+      ic = Object.assign({}, base, { surf, ice: true });
+      iceColorCache.set(world, ic);
+      return ic;
+    }
     let c = worldColorCache.get(world);
     if (c) return c;
     const P = (world && world.palette) || {};
@@ -179,7 +227,9 @@
 
   // ------------------------------------------------------------------ decoration painters (WORLD, y-up)
   // Each: (ctx, x, y, s, v, t, C) — ground point (x, y), scale s, variant v (0..3), time t, world colours C.
+  let NO_GLOW = false;                  // set while painting the front decoration layer (drawn over the car)
   function additive(ctx, color, x, y, r, a) {
+    if (NO_GLOW) return;
     const g = glow(color);
     if (!g || a <= 0) return;
     ctx.globalCompositeOperation = 'lighter';
@@ -785,6 +835,13 @@
       this._ftEma = 0; this._ftN = 0; this._slowT = 0; this._fastT = 0; this._floorT = 0;
       this._upWait = FAST_HOLD; this._lastUpAt = -100; this._monClock = 0;
       this._extMonitor = false;
+      // display-period estimate (qa2-1): ring of monitored intervals → p10 snapped to a refresh rate
+      this._ring = new Float32Array(RING_N); this._ringSort = new Float32Array(RING_N); this._ringN = 0;
+      this._vsync = Infinity; this._vsyncDpr = rawDpr();
+      this._capHoldUntil = -1; this._capHold = CAP_HOLD;
+      // pending judgement of the last step down (vsync-cap detection)
+      this._downPending = false; this._emaBefore = 0; this._downMeasT = 0; this._lastDownHelped = false;
+      this._pendingResize = false;       // step changes resize before the next draw, never after one (qa2-3)
       this._moonW = 0;
       this.time = 0;
       this._clock = 0;
@@ -802,7 +859,9 @@
       this._nLava = 0;
       this._labels = new Float32Array(3 * 8);  // (x, y, metres) of visible distance posts
       this._nLabels = 0;
-      this._best = { on: false, x: 0, y: 0 };
+      this._best = { on: false, x: 0, y: 0, label: 'BEST' };
+      this._goal = { on: false, x: 0, y: 0 };          // daily target banner (qa2-7)
+      this._goalRun = null; this._goalDone = false;
       this._strNoise = U.makeNoise1D(0x51a7a);
       this._vopts = { boost: false, shield: false, thruster: false, crashed: false, headlights: false, throttle: 0, lean: 0,
         magnet: 0, multiplier: 0, quality: 'high' };
@@ -838,6 +897,7 @@
       this.suggestedQuality = null;
       this._resetMonitor();
       this._upWait = FAST_HOLD;
+      this._lastDownHelped = false;
       this._applyStep();
       this.resize();
     }
@@ -860,24 +920,46 @@
       this._monitor(U.safeNum(ms, 0) / 1000);
     }
 
+    // Retry one dynamic-resolution step higher (the Game calls this at every run start), so a step taken
+    // during a hitch never sticks for the whole session. A really slow device steps straight back down and
+    // the probe-up back-off grows.
+    nudgeUp() {
+      if (this._autoStep > 0) {
+        this._autoStep--;
+        this._lastUpAt = this._monClock;
+        this._changeStep();
+      }
+      this._resetMonitor();
+    }
+
+    // Apply a pending step-change resize now (drawRun does this itself before drawing). Callers that draw
+    // on r.ctx without drawRun (e.g. a fallback backdrop) call it first.
+    flushResize() {
+      if (!this._pendingResize) return false;
+      this._pendingResize = false;
+      return this.resize();
+    }
+
     // Snapshot for debugging / a settings readout.
     frameStats() {
       return { ema: this._ftEma * 1000, scale: this.renderScale, step: this._autoStep, quality: this.quality,
-        setting: this.qualitySetting, dpr: this.dpr, auto: this.autoQuality, suggested: this.suggestedQuality };
+        setting: this.qualitySetting, dpr: this.dpr, auto: this.autoQuality, suggested: this.suggestedQuality,
+        vsync: this._vsyncPeriod() * 1000 };
     }
 
     _ladder() { return this.qualitySetting === 'auto' ? AUTO_LADDER : AUTO_STEPS; }
 
     // Number of usable ladder steps on this screen (fixed quality: s ≥ 0.7, or down to 1.0 backing px per
-    // CSS px on hi-DPI screens, where that is still as sharp as a normal display).
+    // CSS px on hi-DPI screens, where that is still as sharp as a normal display), and never below 0.7
+    // effective backing px per CSS px (fixed LOW on a DPR-1 screen stays at step 0).
     _ladderLen() {
       const L = this._ladder();
       if (L !== AUTO_STEPS) return L.length;
-      const raw = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
-      const dev = Math.min(raw, DPR_CAP[this.quality] || 2);
+      const dev = Math.min(rawDpr(), DPR_CAP[this.quality] || 2);
+      const base = BASE_SCALE[this.quality] || 1;
       const minS = Math.min(0.7, 1 / dev) - 1e-6;
       let n = 0;
-      while (n < L.length && L[n].s >= minS) n++;
+      while (n < L.length && L[n].s >= minS && base * L[n].s * dev >= 0.7 - 1e-6) n++;
       return Math.max(1, n);
     }
 
@@ -892,40 +974,89 @@
       }
     }
 
-    _resetMonitor() { this._ftEma = 0; this._ftN = 0; this._slowT = 0; this._fastT = 0; this._floorT = 0; }
+    // The learned display period (s) survives _resetMonitor(); it resets only on a DPR / screen change.
+    _resetMonitor() {
+      this._ftEma = 0; this._ftN = 0; this._slowT = 0; this._fastT = 0; this._floorT = 0;
+      this._downPending = false; this._downMeasT = 0;
+    }
 
-    // Frame-interval monitor → dynamic resolution. EMA of the presented-frame interval; > 19 ms for 2 s
-    // steps the render scale down (1 → 0.85 → 0.7), < 15 ms for 5 s steps back up. An upgrade that is
-    // undone within 8 s doubles the next wait (≤ 60 s) so a borderline machine does not oscillate.
-    // Gaps > 0.25 s (pause, hidden tab, on-demand frames) are ignored.
+    _vsyncPeriod() { return this._vsync < Infinity ? this._vsync : VSYNC_DEFAULT; }
+
+    // Every RING_N monitored intervals: p10 of the ring, snapped to a common refresh period (within 7 %),
+    // lowers the display-period estimate. A detected refresh cap blocks lower estimates for a while.
+    _learnVsync() {
+      const a = this._ringSort;
+      a.set(this._ring);
+      a.sort();
+      const snapped = snapPeriod(a[Math.floor(RING_N * 0.1)], REFRESH_HZ, 0.07);
+      if (!snapped || snapped >= this._vsync) return;
+      if (this._monClock < this._capHoldUntil) return;
+      this._vsync = snapped;
+    }
+
+    // Frame-interval monitor → dynamic resolution (qa2-1). v = learned display period. EMA of the presented-
+    // frame interval; > max(1.2·v, v + 3 ms) for 2 s steps the render scale down, < 1.08·v for _upWait
+    // (6 s, doubling ≤ 60 s when an upgrade is undone within 8 s) probes one step back up. After a step
+    // down, 3 s are measured at the new step before the next one: if the EMA did not improve (≥ 92 %) and
+    // sits within 10 % of a refresh period, the display is capped there (30 / 40 / 50 Hz…) — the step is
+    // undone and v = that period. suggestedQuality only when the floor is slow although the last step
+    // down measurably helped. Gaps > 0.25 s (pause, hidden tab, on-demand frames) are ignored.
     _monitor(dt) {
       if (!this.autoQuality) return;
+      const raw = rawDpr();
+      if (raw !== this._vsyncDpr) { this._vsyncDpr = raw; this._vsync = Infinity; this._ringN = 0; this._capHoldUntil = -1; }
       if (!(dt > 0) || dt > 0.25) { this._ftN = 0; this._slowT = 0; this._fastT = 0; return; }
       this._monClock += dt;
+      this._ring[this._ringN++] = dt;
+      if (this._ringN >= RING_N) { this._ringN = 0; this._learnVsync(); }
       this._ftEma = this._ftN === 0 ? dt : this._ftEma + (dt - this._ftEma) * 0.08;
       this._ftN++;
       if (this._ftN < 20) return;                       // let the EMA settle first
       const nSteps = this._ladderLen();
-      if (this._autoStep > nSteps - 1) { this._autoStep = nSteps - 1; this._changeStep(); return; }   // DPR changed
-      if (this._ftEma > FT_SLOW) {
+      if (this._autoStep > nSteps - 1) { this._autoStep = nSteps - 1; this._downPending = false; this._changeStep(); return; }   // DPR changed
+      const v = this._vsyncPeriod();
+      const slowThr = Math.max(1.2 * v, v + 0.003), fastThr = 1.08 * v;
+      if (this._downPending) {
+        this._downMeasT += dt;
+        if (this._downMeasT >= CAP_MEASURE) {
+          this._downPending = false;
+          const helped = this._ftEma < 0.92 * this._emaBefore;
+          const cap = helped ? 0 : snapPeriod(this._ftEma, CAP_HZ, 0.1);
+          this._lastDownHelped = helped;
+          if (cap && this._autoStep > 0) {
+            // the display (or the browser) is capped at this rate: the lower step bought nothing
+            this._vsync = cap;
+            this._capHoldUntil = this._monClock + this._capHold;
+            this._capHold = Math.min(120, this._capHold * 2);
+            this._autoStep--;
+            this._slowT = 0; this._fastT = 0; this._floorT = 0;
+            this._changeStep();
+            return;
+          }
+        }
+      }
+      if (this._ftEma > slowThr) {
         this._slowT += dt; this._fastT = 0;
-        if (this._slowT >= SLOW_HOLD) {
+        if (this._slowT >= SLOW_HOLD && !this._downPending) {
           this._slowT = 0;
           if (this._autoStep < nSteps - 1) {
             if (this._monClock - this._lastUpAt < 8) this._upWait = Math.min(60, this._upWait * 2);
+            this._emaBefore = this._ftEma;
             this._autoStep++;
             this._changeStep();
-          } else if (this.qualitySetting !== 'auto' && this.quality !== 'low') {
+            this._downPending = true; this._downMeasT = 0;
+          } else if (this.qualitySetting !== 'auto' && this.quality !== 'low' && this._lastDownHelped) {
             this._floorT += SLOW_HOLD;
             if (this._floorT >= 4) this.suggestedQuality = this.quality === 'high' ? 'medium' : 'low';
           }
         }
-      } else if (this._ftEma < FT_FAST) {
+      } else if (this._ftEma < fastThr) {
         this._fastT += dt; this._slowT = 0; this._floorT = 0;
         if (this._fastT >= this._upWait && this._autoStep > 0) {
           this._fastT = 0;
           this._autoStep--;
           this._lastUpAt = this._monClock;
+          this._downPending = false;
           this._changeStep();
         }
       } else {
@@ -934,9 +1065,11 @@
       }
     }
 
+    // Step change: the backing store is resized right before the next draw (drawRun / flushResize), never
+    // between a drawn frame and its presentation — assigning canvas.width clears it (qa2-3).
     _changeStep() {
       this._applyStep();
-      this.resize();
+      this._pendingResize = true;
       this._ftN = 0;                                     // re-measure at the new scale
     }
 
@@ -950,8 +1083,8 @@
         ch = r && r.height > 0 ? r.height : (typeof innerHeight === 'number' ? innerHeight : 540);
       }
       cw = Math.max(1, Math.round(cw)); ch = Math.max(1, Math.round(ch));
-      const raw = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
-      const dev = Math.min(raw, DPR_CAP[this.quality] || 2);
+      this._pendingResize = false;
+      const dev = Math.min(rawDpr(), DPR_CAP[this.quality] || 2);
       // effective backing ratio (what every transform uses); CSS size of the canvas is unchanged
       const dpr = Math.max(0.25, Math.round(dev * clamp(U.safeNum(this.renderScale, 1), 0.25, 1) * 1000) / 1000);
       this.deviceRatio = dev;
@@ -997,13 +1130,15 @@
       const rdt = this._lastNow ? clamp(rawDt, 0, 0.1) : 1 / 60;
       this._lastNow = now;
       if (!this._extMonitor) this._monitor(rawDt);
+      if (this._pendingResize) this.flushResize();      // a step change resizes before drawing (qa2-3)
       // 'auto' quality: keep the run's background / particles on the quality the ladder picked
       if (this.qualitySetting === 'auto') this._syncRunQuality(run);
       this._clock += rdt;
       const t = isNum(run.time) ? run.time : this._clock;
       this.time = t;
       const world = run.world || (RR.Worlds && RR.Worlds.list ? RR.Worlds.list[0] : null) || EMPTY;
-      const C = worldColors(world);
+      const mods = run.modifiers;
+      const C = worldColors(world, !!(mods && isNum(mods.frictionMul) && mods.frictionMul < 0.8));
       const env = run.env || EMPTY;
       const cam = this._cameraFor(run);
       if (typeof cam.setViewport === 'function' && (Math.abs((cam.viewW || 0) - this.w) > 0.5 || Math.abs((cam.viewH || 0) - this.h) > 0.5)) {
@@ -1052,11 +1187,11 @@
       // ---- world
       this.worldTransform(cam);
       if (terrain) {
-        this._drawDecorations(ctx, terrain, world, t, 'back', b, cam.zoom);
+        this._drawDecorations(ctx, terrain, world, t, 'back', b, cam.zoom, NaN);
         this._drawTerrain(ctx, terrain, world, C, t, b, cam.zoom || 40);
         this._drawPosts(ctx, terrain, C, b, run, t);
         this._drawCeiling(ctx, terrain, C, b, t);
-        if (this._nLabels || this._best.on) {
+        if (this._nLabels || this._best.on || this._goal.on) {
           this.screenTransform();
           this._drawPostLabels(ctx, cam);
           this.worldTransform(cam);
@@ -1066,7 +1201,7 @@
       if (run.events && typeof run.events.drawWorld === 'function') this._safe('events.world', run.events.drawWorld, run.events, ctx, run);
       if (run.particles && typeof run.particles.draw === 'function') this._safe('particles', run.particles.draw, run.particles, ctx, cam);
       if (run.body) this._drawVehicle(ctx, run, terrain, t);
-      if (terrain) this._drawDecorations(ctx, terrain, world, t, 'front', b, cam.zoom);
+      if (terrain) this._drawDecorations(ctx, terrain, world, t, 'front', b, cam.zoom, run.body ? U.safeNum(run.body.x, NaN) : NaN);
 
       // ---- screen
       this.screenTransform();
@@ -1312,8 +1447,9 @@
             this._nLava++;
           }
         } else {
-          const key = keys[si] || C.main;
-          const st = C.surf[key] || C.surf[C.main] || SURF.dirt;
+          const k0 = keys[si] || C.main;
+          const st = C.surf[k0] || C.surf[C.main] || SURF.dirt;
+          const key = C.ice ? 'ice' : k0;                // glazed: ice-sheen detail on every surface
           this._drawBand(ctx, a, end, st, key, C, t, zoom);
         }
         a = e + 1;
@@ -1550,9 +1686,13 @@
     _drawPosts(ctx, T, C, b, run, t) {
       this._nLabels = 0;
       this._best.on = false;
+      this._goal.on = false;
       if (this._nPts < 2) return;
+      // daily target: a gold GOAL banner until it is reached (or today's challenge is already done) — qa2-7
+      const goal = this._dailyGoal(run);
       const first = Math.max(100, Math.ceil((b.left - 1) / 100) * 100);
       for (let m = first; m <= b.right + 1 && this._nLabels < 8; m += 100) {
+        if (goal > 0 && Math.abs(m - goal) < 2.5) continue;       // the GOAL banner replaces that post
         const y = this._yAt(m);
         const major = m % 1000 === 0;
         const hgt = major ? 2.8 : 2.2;
@@ -1575,8 +1715,9 @@
         this._labels[o] = m; this._labels[o + 1] = y + hgt + bh / 2; this._labels[o + 2] = major ? 1 : 0;
         this._nLabels++;
       }
+      if (goal > 0 && goal >= b.left - 3 && goal <= b.right + 3) this._drawGoal(ctx, goal, t);
       const best = U.safeNum(run.bestDistance, 0);
-      if (best > 0 && best >= b.left - 3 && best <= b.right + 3) {
+      if (best > 0 && best >= b.left - 3 && best <= b.right + 3 && !(this._goal.on && Math.abs(best - goal) < 4)) {
         const y = this._yAt(best);
         const hgt = 3.4;
         ctx.fillStyle = '#e9edf5';
@@ -1598,7 +1739,54 @@
         }
         ctx.fill();
         this._best.on = true; this._best.x = best; this._best.y = y + hgt + 0.35;
+        this._best.label = typeof run.bestLabel === 'string' && run.bestLabel ? run.bestLabel : 'BEST';
       }
+    }
+
+    // Daily target distance still to reach on this run (0 = none). "Already completed today" is looked up
+    // once per run (it only changes when a run is banked).
+    _dailyGoal(run) {
+      const d = run.mode === 'daily' ? run.daily : null;
+      const target = d ? U.safeNum(d.targetDistance, 0) : 0;
+      if (!(target > 0) || U.safeNum(run.distance, 0) >= target) return 0;
+      if (this._goalRun !== run) {
+        this._goalRun = run;
+        this._goalDone = false;
+        try {
+          const st = RR.Daily && typeof RR.Daily.status === 'function' ? RR.Daily.status() : null;
+          this._goalDone = !!(st && st.completed && (!d.day || st.day === d.day));
+        } catch (e) { this._goalDone = false; }
+      }
+      return this._goalDone ? 0 : target;
+    }
+
+    // Gold pole + waving gold / checkered banner at the daily target.
+    _drawGoal(ctx, x, t) {
+      const y = this._yAt(x);
+      const hgt = 4;
+      ctx.fillStyle = '#ffe7a0';
+      ctx.fillRect(x - 0.08, y - 0.2, 0.16, hgt + 0.2);
+      ctx.fillStyle = '#b8860b';
+      ctx.beginPath(); ctx.arc(x, y + hgt + 0.08, 0.16, 0, TAU); ctx.fill();
+      const fw = 2, fh = 1.2, cols = 8, rows = 3;
+      const wave = (k) => Math.sin(t * 4 - k * 0.7) * 0.1 * k / cols;
+      ctx.fillStyle = '#ffcc33';
+      ctx.beginPath();
+      ctx.moveTo(x, y + hgt);
+      for (let k = 1; k <= cols; k++) ctx.lineTo(x + fw * k / cols, y + hgt + wave(k));
+      for (let k = cols; k >= 0; k--) ctx.lineTo(x + fw * k / cols, y + hgt - fh + wave(k));
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#7a4f00';
+      ctx.beginPath();
+      for (let k = 0; k < cols; k++) {
+        for (let r = 0; r < rows; r++) {
+          if ((k + r) & 1) continue;
+          ctx.rect(x + fw * k / cols, y + hgt - fh * (r + 1) / rows + wave(k + 0.5), fw / cols, fh / rows);
+        }
+      }
+      ctx.fill();
+      this._goal.on = true; this._goal.x = x; this._goal.y = y + hgt + 0.35;
     }
 
     _drawPostLabels(ctx, cam) {
@@ -1618,16 +1806,20 @@
         ctx.fillStyle = '#1d2230';
         ctx.fillText(this._label(m), p.x, p.y + 1);
       }
-      if (this._best.on) {
-        if (toScreen) cam.worldToScreen(this._best.x, this._best.y, p);
-        else { p.x = this.w / 2 + (this._best.x - U.safeNum(cam.x, 0)) * z; p.y = this.h / 2 - (this._best.y - U.safeNum(cam.y, 0)) * z; }
-        ctx.font = FONT_CACHE(fs + 2);
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = 'rgba(20,10,30,0.85)';
-        ctx.strokeText('BEST', p.x, p.y - fs * 0.9);
-        ctx.fillStyle = '#ffd34d';
-        ctx.fillText('BEST', p.x, p.y - fs * 0.9);
-      }
+      if (this._best.on) this._flagLabel(ctx, cam, this._best, this._best.label, '#ffd34d', fs);
+      if (this._goal.on) this._flagLabel(ctx, cam, this._goal, 'GOAL', '#ffcc33', fs);
+    }
+
+    _flagLabel(ctx, cam, f, text, color, fs) {
+      const p = this._p, z = cam.zoom || 40;
+      if (typeof cam.worldToScreen === 'function') cam.worldToScreen(f.x, f.y, p);
+      else { p.x = this.w / 2 + (f.x - U.safeNum(cam.x, 0)) * z; p.y = this.h / 2 - (f.y - U.safeNum(cam.y, 0)) * z; }
+      ctx.font = FONT_CACHE(fs + 2);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(20,10,30,0.85)';
+      ctx.strokeText(text, p.x, p.y - fs * 0.9);
+      ctx.fillStyle = color;
+      ctx.fillText(text, p.x, p.y - fs * 0.9);
     }
 
     _label(m) {
@@ -1702,9 +1894,19 @@
       ctx.stroke();
     }
 
-    _drawDecorations(ctx, T, world, t, layer, b, zoom) {
+    // Front layer (drawn over the car, qa2-10): no additive glows, and a prop overlapping the car's
+    // [x − 2.2, x + 2.2] (carX) is drawn at 35 % so it never hides the vehicle.
+    _drawDecorations(ctx, T, world, t, layer, b, zoom, carX) {
       const ds = T.decorations;
       if (!Array.isArray(ds) || !ds.length) return;
+      const front = layer === 'front';
+      NO_GLOW = front;
+      try { this._drawDecoList(ctx, ds, world, t, layer, b, front && isNum(carX) ? carX : NaN); } finally { NO_GLOW = false; }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    _drawDecoList(ctx, ds, world, t, layer, b, carX) {
       // binary search for the first decoration that could be visible (sorted by x)
       const left = b.left - 9;
       let lo = 0, hi = ds.length;
@@ -1720,17 +1922,23 @@
         if (d.y > b.top + 1 || d.y < b.bottom - 12) continue;
         const fn = DECOR[d.type] || DECOR.rock;
         const s = clamp(U.safeNum(d.scale, 1), 0.2, 3);
+        let a = 1;
         if (live < 1 && LIVING[d.type]) {
           if (live <= 0.01) continue;
-          ctx.globalAlpha = live;
+          a = live;
+        }
+        if (carX === carX) {
+          const gap = Math.abs(d.x - carX) - (2.2 + 1.2 * s);          // < 0: the prop overlaps the car
+          if (gap < 1.5) a = Math.min(a, 0.35 + 0.65 * U.smoothstep(0, 1.5, gap));
+        }
+        if (a < 1) {
+          ctx.globalAlpha = a;
           fn(ctx, d.x, d.y, s, (d.variant | 0) & 3, t, C, world);
           ctx.globalAlpha = 1;
           continue;
         }
         fn(ctx, d.x, d.y, s, (d.variant | 0) & 3, t, C, world);
       }
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
     }
 
     // ================================================================ vehicle
@@ -2346,6 +2554,7 @@
   };
 
   Renderer.drawDecoration = drawDecoration;
+  Renderer.worldColors = worldColors;      // (world, ice?) → palette (tests / tools)
   Renderer.DECORATION_TYPES = DECORATION_TYPES;
   RR.Renderer = Renderer;
 })();

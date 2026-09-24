@@ -22,7 +22,8 @@
  *    (playing / paused / results), M mute (sound + music, persisted, toast).
  *  - Runs are banked exactly once: endRun = bankRun (Progression.applyRunResults + Daily.recordAttempt
  *    with the run's own challenge day) + the results UI. R / pause RESTART mid-run (also on the CRASHED
- *    stamp or while coasting out of fuel) banks the run first, then starts the next one.
+ *    stamp or while coasting out of fuel) banks the run first, then starts the next one (toasting the
+ *    banked coins / record and a daily challenge completed by that run).
  *  - Audio: RR.Audio.init() on Input 'firstGesture', then settings + current music are applied.
  *
  * Contract additions (documented, never renames):
@@ -277,6 +278,7 @@
   // Sky + parallax only (used when RR.Run is unavailable or the attract run keeps failing).
   function drawFallback(dt) {
     if (!renderer || !renderer.ctx) return;
+    if (typeof renderer.flushResize === 'function') renderer.flushResize();   // pending step change (qa2-3)
     const ctx = renderer.ctx;
     const worldId = RR.Save.data.selectedWorld;
     if (!fallback || fallback.worldId !== worldId) {
@@ -352,6 +354,8 @@
     runEnded = false;
     runErrorStreak = 0;
     lastParams = p;
+    // dynamic resolution: every run re-tries one step higher, so a hitch never lowers it for good (qa2-1)
+    if (typeof renderer.nudgeUp === 'function') safe(() => renderer.nudgeUp(), 'renderer.nudgeUp');
     applyRunQuality(run);
     syncViewport(run);
     if (RR.HUD) { RR.HUD.reset(run); RR.HUD.show(true); }
@@ -478,6 +482,16 @@
       if (rw.newWorldRecord && (rw.previousBest || 0) >= 50) parts.push('new best ' + U.formatInt(dist) + ' m');
       else if (rw.newDailyBest) parts.push('best today ' + U.formatInt(dist) + ' m');
       if (parts.length) toast(parts.join(' · '), 'reward', 2600);
+    }
+    // the results screen (skipped on R) normally announces a completed daily; its level-up (if any) is
+    // already queued through RR.Bus 'levelup' like every other level-up (qa2-8)
+    const dr = res.dailyResult;
+    if (dr && dr.completedNow && dr.reward) {
+      const U = RR.Util, rw = dr.reward;
+      let msg = 'Daily challenge complete! +' + U.formatInt(rw.coins || 0) + ' coins';
+      if (rw.xp) msg += ' · +' + U.formatInt(rw.xp) + ' XP';
+      if (rw.tokens) msg += ' · +' + U.formatInt(rw.tokens) + (rw.tokens === 1 ? ' token' : ' tokens');
+      toast(msg, 'daily', 3200);
     }
     return res;
   }

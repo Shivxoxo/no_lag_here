@@ -33,6 +33,7 @@ RR.__ctx.console = Object.assign({}, console, { error: (...a) => { consoleErrors
 if (RR.Save && RR.Save.load) RR.Save.load();
 
 const hudLog = [];
+const REAL_HUD = RR.HUD;                 // the real module (its pure helpers are tested below)
 RR.HUD = {
   update() {}, show() {}, reset() {}, init() {},
   popTrick: (...a) => hudLog.push(['popTrick', ...a]),
@@ -730,6 +731,7 @@ H.test('crash detection: head hit, lava, flipped on the roof, stuck on its tail'
   let flippedAt = -1;
   frames(run, 4, (r, i) => { r.body.headHit = false; if (flippedAt < 0 && r.state === 'crashed') flippedAt = i; });
   H.assert(run.state !== 'running', 'upside-down car must crash');
+  if (run.crashReason === 'flipped') H.assert(run.crashPose === 'roof' && run.getSummary().crashPose === 'roof', 'roof pose (' + run.crashPose + ')');
   run.destroy();
   // tail-stand: 80° nose-up resting on the tail
   run = newRun();
@@ -738,7 +740,21 @@ H.test('crash detection: head hit, lava, flipped on the roof, stuck on its tail'
   let crashed = false;
   frames(run, 4, (r) => { r.body.headHit = false; crashed = crashed || r.state === 'crashed'; });
   H.assert(crashed ? run.crashReason === 'flipped' || run.crashReason === 'head' : run.state === 'running', 'tail stand handled (' + run.state + ' ' + run.crashReason + ')');
+  if (run.crashReason === 'flipped') {
+    // it either stayed on its tail or toppled over backwards onto the roof: the pose says which
+    const rel = run.crashRel, want = Math.abs(rel) > 110 * Math.PI / 180 ? 'roof' : rel > 0 ? 'tail' : 'nose';
+    H.assert(run.crashPose === want && (want === 'tail' || want === 'roof'), 'tail stand pose ' + run.crashPose + ' (rel ' + rel.toFixed(2) + ')');
+    const sm = run.getSummary();
+    H.assert(sm.crashPose === run.crashPose && Math.abs(sm.crashRel - rel) < 1e-3, 'summary carries crashPose / crashRel (' + sm.crashPose + ', ' + sm.crashRel + ')');
+  }
   run.destroy();
+  // qa2-11: captions follow the pose (HUD stamp and results share RR.HUD.crashText)
+  const ct = REAL_HUD && REAL_HUD.crashText;
+  H.assert(typeof ct === 'function', 'RR.HUD.crashText exported');
+  H.assert(ct('flipped', 'tail') === 'Stood on its tail too long', 'tail caption: ' + ct('flipped', 'tail'));
+  H.assert(ct('flipped', 'nose') === 'Stuck on its nose', 'nose caption');
+  H.assert(ct('flipped', 'roof') === 'Landed on the roof' && ct('flipped') === 'Landed on the roof', 'roof / no pose caption');
+  H.assert(ct('head', 'tail') === 'Head over heels', 'pose only affects flipped');
 });
 
 H.test('slow time: physics ×0.55, power-up timer on real time', () => {
@@ -1188,7 +1204,43 @@ H.test('tail / roof slide past 75° below 10 m/s counts as flipped after 1.5 s',
   while (run.state === 'running' && t < 3) { hold(); run.update(DT); t += DT; }
   run.body.step = step;
   H.assert(run.state === 'crashed' && run.crashReason === 'flipped', 'flipped (' + run.state + ')');
+  H.assert(run.crashPose === 'tail', 'nose-up slide is a tail stand (' + run.crashPose + ')');
   H.assert(t >= 1.45 && t <= 1.7, 'after ~1.5 s (' + t.toFixed(2) + ')');
+  run.destroy();
+});
+
+// qa2-2: the headwind the physics sees is soft-capped at −5 m/s² — a stock car keeps moving at full throttle.
+H.test('headwind soft cap: Storm Planet at −12 ambient + a headwind gust never stalls a stock car', () => {
+  for (const seed of [1, 2, 3, 4]) {
+    const run = newRun({ worldId: 'storm_planet', vehicleId: 'trail_buggy', seed });
+    const ev = run.events;
+    ev.ambientWind = () => -12;
+    ev.nextAt = Infinity;                       // scheduler off: only the forced gust
+    H.assert(ev.forceEvent('wind_gust'), 'gust forced');
+    const g = ev.active.find((r) => r.id === 'wind_gust');
+    g.dir = -1;
+    let minPhys = 0, minEnv = 0, t = 0, minVx = Infinity;
+    frames(run, 6, (r) => {
+      controls.throttle = 1; controls.lean = 0; controls.handbrake = false;
+      t += DT;
+      minPhys = Math.min(minPhys, r.physWind);
+      minEnv = Math.min(minEnv, r.env.wind);
+      if (t > 3) minVx = Math.min(minVx, r.body.vx);
+    });
+    H.assert(minPhys >= -5.0, 'seed ' + seed + ': physics headwind ≥ −5 (min ' + minPhys.toFixed(3) + ')');
+    H.assert(minEnv <= -15, 'seed ' + seed + ': env.wind keeps the full storm for the visuals (min ' + minEnv.toFixed(1) + ')');
+    H.assert(minVx > 3, 'seed ' + seed + ': stock trail_buggy keeps vx > 3 m/s after 3 s (min ' + minVx.toFixed(2) + ')');
+    run.destroy();
+  }
+  // the cap is linear to −3, soft beyond, and leaves tailwinds alone
+  const run = newRun();
+  const ev = run.events;
+  ev.nextAt = Infinity;
+  for (const [w, lo, hi] of [[-2, -2, -2], [-3, -3, -3], [-4, -4, -3.8], [-6, -5, -4.6], [-20, -5, -4.99], [8, 8, 8], [25, 20, 20]]) {
+    ev.ambientWind = () => w;
+    frames(run, 2 * DT);                        // physics reads last frame's env.wind
+    H.assert(run.physWind >= lo - 1e-9 && run.physWind <= hi + 1e-9, 'wind ' + w + ' → physics ' + run.physWind.toFixed(3));
+  }
   run.destroy();
 });
 

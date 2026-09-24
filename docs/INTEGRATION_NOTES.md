@@ -183,9 +183,9 @@ Behaviour and API changes from the fix waves; each file header documents its par
 **Visuals** (`renderer.js`, `background.js`, `vehicleArt.js`, `particles.js`)
 - `r.dpr` = effective backing ratio `min(devicePixelRatio, cap) × renderScale` (caps low 1 / medium 1.25 / high 2;
   LOW base scale 0.75); `r.deviceRatio`, `r.renderScale`, `r.quality` (rendered) vs `r.qualitySetting`
-  (`'low'|'medium'|'high'|'auto'`). Dynamic resolution on by default (EMA > 19 ms for 2 s → step down 1 → 0.85 →
-  0.7 [→ 0.6 → 0.5 on hi-DPI]; < 15 ms for 5 s → up); 'auto' also steps quality high → medium → low.
-  `setAutoQuality(bool)`, `reportFrameTime(ms)`, `frameStats()`, `suggestedQuality`, `onQualityHint`.
+  (`'low'|'medium'|'high'|'auto'`). Dynamic resolution on by default; 'auto' also steps quality high → medium →
+  low. `setAutoQuality(bool)`, `reportFrameTime(ms)`, `frameStats()`, `suggestedQuality`, `onQualityHint`.
+  (The fixed 19 ms / 15 ms thresholds were replaced in the second QA pass — see below.)
 - LOW darkness draws gradients directly (no light map); background layers stop at the next layer's baseline; LOW
   drops the far layer and haze. Trimmed terrain left of `T.minX` renders as a rock cliff matching the collision wall.
 - MAGNET rings + pulled-coin streaks; 2X COINS gold aura/rim (`VehicleArt.draw` opts `multiplier`, `quality`);
@@ -213,3 +213,77 @@ Behaviour and API changes from the fix waves; each file header documents its par
   `'unavailable'` on the next tick); a later successful write restores `persistent`. Settings `quality` accepts
   `'auto'`.
 - New Bus events: `saveError`, `missionAutoClaim`, `wallet`.
+
+## Second QA pass (qa2-1 … qa2-16)
+Fresh-eyes QA round → fixes. Each file header documents its part; behaviour / API changes:
+
+**Dynamic resolution** (`renderer.js`, `game.js`) — qa2-1 / qa2-3
+- The monitor learns the display period v: every 60 monitored intervals, p10 snapped to 1/[240,165,144,120,90,75,
+  60,50,30] s (within 7 %) lowers v (never raises it; reset on a devicePixelRatio change; 1/60 until the first
+  estimate). Thresholds are relative: step down when the EMA > max(1.2·v, v + 3 ms) for 2 s; probe one step up when
+  EMA < 1.08·v for `_upWait` (6 s, doubling ≤ 60 s when an upgrade is undone within 8 s). A vsync-locked 60 Hz
+  display (16.7 ms) now steps back up; 50 Hz / 30 Hz panels are not "slow".
+- A step down is judged after 3 s at the new step (the next step down waits for it): EMA ≥ 92 % of the EMA before
+  and within 10 % of a refresh period (incl. 40 Hz) → the display is capped: the step is undone and v = that
+  period (a cap blocks lower ring estimates for 20 s, doubling ≤ 120 s). `suggestedQuality` only when the floor is
+  slow although the last step down measurably helped.
+- AUTO ladder: high 1 → 0.85 → 0.75 → medium 0.85 → low (never below LOW's 0.75). Fixed quality: never below 0.7
+  effective backing px per CSS px (fixed LOW on DPR 1 does not step).
+- Step changes set `_pendingResize`; the canvas is resized at the start of the next `drawRun()` (or
+  `r.flushResize()`, which the Game's fallback backdrop calls) — never between a drawn frame and its presentation
+  (that showed a black frame on every step). New: `r.nudgeUp()` (Game.startRun calls it: every run retries one step
+  higher), `r.flushResize()`, `frameStats().vsync` (ms).
+
+**Wind** (`run.js`, `events.js`, `daily.js`) — qa2-2
+- Physics gets env.wind with the headwind soft-capped: linear to −3 m/s², then `−3 − 2·tanh((−w−3)/2)` → −5
+  (both limits × gravity ratio below 1 g, e.g. MOON sections); tailwinds ≤ +20. `run.physWind` = that value. env.wind
+  itself stays uncapped (rain, streaks, particles, clouds keep the full storm).
+- `ev.ambientWind(t?)`: the gust term fades in with `smoothstep(0, 8, t)` (run time). When ambient + THE STORM wind
+  first drops below −3 m/s² (1 m/s² hysteresis) with no wind_gust active: `'HEADWIND!'` ('info'), ≤ 1 per 12 s,
+  never in attract mode.
+- Gale Force copy: "Howling head- and tailwinds. Ride the tailwinds, save fuel in the headwinds."
+
+**Falling rocks** (`events.js`, `run.js`, `hud.js`) — qa2-4
+- Drops are placed so every rock is down ≥ `ROCK_CLEAR` 0.9 s before a car holding its speed reaches it:
+  `x_i ≥ b.x + v·(at_i + fallT_i + 0.9)` and ≥ b.x + 14 m (v = clamp(vx, 3, 28)), centre = the minimum + U(0, 0.5·v).
+  Spawn height / fall time are fixed at the warning (`d.y0`, `d.fallT`, `_rockDrop`); if the camera rose meanwhile
+  the rock enters from above the view already falling and lands on time. Markers last `at + fallT + 1.4`.
+- Only a rock that has never touched the ground is lethal (a landed rock bouncing onto the cab is a knock).
+- `run.warn(text, kind, sub?)` / `HUD.warning(text, kind, sub?)`: optional sub-line; rocks warn
+  "FALLING ROCKS!" + "Don't rush in — let them land".
+
+**UI / HUD** (`hud.js`, `screens.js`, `style.css`, `game.js`)
+- qa2-5: the HUD pause button pauses on touch/pen `pointerup` (works while another finger holds a pedal),
+  `touch-action: none`; the click listener serves mouse / keyboard and ignores a click within 400 ms of a handled
+  tap (a window-capture listener also swallows that ghost click elsewhere).
+- qa2-6: in `@media (max-height: 520px)` px floors: buttons / segments / chips ≥ 40 px tall (pause buttons 44),
+  arrow buttons 40×40, toggles 48×30 + a 6 px invisible hit pad, swatches ≥ 32 px in a horizontally scrolling row,
+  text ≥ 9 px (every rule ≤ 0.8 rem gets `max(9px, …)`); `.tc-small span` ≥ 9 px everywhere.
+- qa2-8: R past a daily target toasts "Daily challenge complete! +N coins · +N XP" (its level-up already goes
+  through the Bus 'levelup' queue).
+- qa2-9: the garage opened for another owned car (`{vehicleId}`) selects it and calls `game.refreshAttract()`.
+- qa2-11: `run.crashPose` ('roof' | 'tail' | 'nose' for 'flipped', else null) and `run.crashRel` (rad vs slope, +
+  = nose up) on every crash, also in the summary (`crashPose`, `crashRel`). `RR.HUD.crashText(reason, pose?)` →
+  'Stood on its tail too long' / 'Stuck on its nose' for flipped tail / nose stands; results use it too.
+- qa2-12: results show the "no tricks" tip even when the combo chip is present; a `.res-coach` line under the
+  crash reason for the first 10 runs (head nose-dive / over-rotation, rock, tail stand, lava; touch wording on
+  touch UIs).
+- qa2-13: daily runs show the modifier labels (`run.daily.modifiers.labels`) as a chip under GOAL.
+
+**Visuals / data** (`renderer.js`, `terrain.js`, `run.js`, `vehicles.js`)
+- qa2-7: the record flag is labelled `run.bestLabel` ('BEST TODAY' on dailies); a gold GOAL banner stands at
+  `run.daily.targetDistance` until it is passed (not when today's challenge is already completed — read once per
+  run from `RR.Daily.status()`); within 4 m of the best flag only GOAL is drawn.
+- qa2-10: front-layer decorations are low props only (`rock, bush, flowers, tumbleweed, snow_mound, bones,
+  lava_rock`); crystals, ice crystals, cairns and alien plants stay in the back layer. The front pass skips
+  additive glows and draws a prop overlapping the car (x ± 2.2 m + its size) at 35 % (smooth 1.5 m ramp).
+- qa2-13: `run.modifiers.frictionMul < 0.8` (Black Ice) → `RR.Renderer.worldColors(world, true)`: every surface
+  but lava glazed with SURF.ice colours + ice-sheen band; wheel spray / take-off / landing particles are ice.
+- qa2-14: `describeUpgrade()` adds `effect` / `effectLabel` / `effectValue` (player-facing, relative to level 1:
+  top speed, landing softness, snow grip, seconds of fuel, climbable slope, flip speed, stopping power); the garage
+  headlines "label current › next" with the old `value` pair as the small second line (`value` / `detail` unchanged).
+
+**Docs / tooling** — qa2-15 / qa2-16: README and ARCHITECTURE corrected (semi-fixed timestep, XP formula and rules,
+`recordAttempt` signature, AUTO quality, paints by level, first section at 1.2–1.8 km, R any time). `npm run smoke`
+uses `$NODE_PATH` or `npm root -g`; `SMOKE_SCENARIO=qa2` runs a single smoke scenario.
+

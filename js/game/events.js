@@ -34,6 +34,10 @@
  *    events + THE STORM term, clamped ±20. wind_gust is picked twice as often when ambAmp > 0. On an
  *    uncleared boss climb the ambient gusts ease to 40 % (ev.ambBossMul) — the headwall is a climb, not a
  *    wind lottery (upgraded cars were flipped over backwards at crawl speed).
+ *    Second QA pass (qa2-2): the gust term fades in over the first 8 s of a run (smoothstep on the run
+ *    time); when ambient + THE STORM wind first drops below −3 m/s² (1 m/s² hysteresis) and no wind_gust
+ *    is active, 'HEADWIND!' ('info') is warned, at most every 12 s. Run soft-caps the headwind the
+ *    physics sees at −5 m/s² (run.physWind); env.wind itself stays uncapped (±20) for the visuals.
  *  - ev.jumpSfxAt = ev.time of the last pad / moving-ramp 'jump' SFX (Run skips its own take-off cue).
  *  - Lava eruptions / meteor showers are aimed so a car HOLDING its speed is never hit (see
  *    _findEruptionPoint / meteor_shower.start); fuel_zone is unavailable under modifiers.noFuelPickups;
@@ -50,7 +54,13 @@
  *  - Lava eruptions can also occur inside volcano sections of worlds whose pool lacks 'lava_eruption'.
  *  - In attract mode no warnings/banners/audio are emitted and nothing can damage the vehicle.
  *  - (integration) A falling rock is fatal only while it is still coming down; once landed it is a
- *    knock-back obstacle (ramming a rolling boulder at speed no longer ends the run on its own).
+ *    knock-back obstacle (ramming a rolling boulder at speed no longer ends the run on its own). (qa2-4)
+ *    "Landed" means it touched the ground once: a landed rock bouncing onto the cab is a knock, not a crash.
+ *  - (qa2-4) Falling rocks are placed so they are down ROCK_CLEAR (0.9 s) before a car holding its speed
+ *    reaches them (x_i ≥ b.x + v·(at_i + fallT_i + 0.9), ≥ 14 m ahead): keep driving, braking and stopping
+ *    are safe, only surging into the drop zone is not. Spawn height / fall time are fixed at the warning
+ *    (d.y0, d.fallT); if the camera rose meanwhile the rock enters from above the view already falling
+ *    and still lands on time. run.warn(text, kind, sub) gets an optional sub-line ("Don't rush in").
  */
 (function () {
   'use strict';
@@ -67,10 +77,15 @@
   const BOSS_LOOKAHEAD = 300;       // m — no new events this close before a boss section
   const MAX_ACTIVE = 3;             // concurrent events (only one of them may be a hazard)
   const ROCK_TELEGRAPH = 1.8;       // s between the warning and the first rock drop
+  const ROCK_CLEAR = 0.9;           // s a rock is down before a car holding its speed reaches its x (qa2-4)
+  const ROCK_VIEW_MARGIN = 2;       // m above the view top at the warning (the camera may rise before the drop)
   const METEOR_TELEGRAPH = 1.8;
   const LIGHTNING_TELEGRAPH = 1.8;
   const LAVA_TELEGRAPH = 2.0;
   const BOSS_AMB_MUL = 0.4;         // ambient gusts are damped to this share on an uncleared boss climb …
+  const AMB_RAMP = 8;               // s: the ambient gust field fades in over the first seconds of a run (qa2-2)
+  const AMB_WARN_WIND = 3;          // m/s²: ambient + storm headwind past this → 'HEADWIND!' (qa2-2) …
+  const AMB_WARN_COOL = 12;         // … at most every 12 s, never on top of a wind_gust warning
   const BOSS_AMB_RATE = 1.2;        // … eased at this rate (1/s), so the crux is a climb, not a wind lottery
   const STEEP_SLOPE = 0.35;         // 'STEEP CLIMB AHEAD' window: slope ≥ this (≈ 19°) …
   const STEEP_WIN = 12;             // … for ≥ this many metres …
@@ -142,20 +157,39 @@
   DEFS.falling_rocks = {
     weight: 1.2,
     available() { return true; },
+    // Rocks land BEFORE a car holding its speed arrives (qa2-4): every drop i satisfies
+    // x_i ≥ b.x + v·(at_i + fallT_i + ROCK_CLEAR) and x_i ≥ b.x + 14 (v = clamp(vx, 3, 28)), so keeping on,
+    // braking and stopping are all safe — only a hard surge into the drop zone can be caught. The spawn
+    // height (and so the fall time) is fixed here; _spawnRock uses it, so the timing is exact.
     start(sys, rec) {
       const b = sys.run.body, rng = sys.rng;
       const v = clamp(safeNum(b.vx, 0), 3, 28);
       const n = rng.int(3, 6);
-      const lead = rng.range(2.5, 3.5);                 // impact points ≈ where the car will be in 2.5–3.5 s
-      const cx = Math.max(b.x + v * lead, b.x + 14);
       const spacing = rng.range(3.2, 5.2);
+      const vb = sys._view();
       rec.drops = [];
       for (let i = 0; i < n; i++) {
-        const x = cx + (i - (n - 1) / 2) * spacing + rng.range(-0.7, 0.7);
-        const at = ROCK_TELEGRAPH + rng.range(0, 0.6);
-        rec.drops.push({ x, at, r: rng.range(0.4, 0.9), spawned: false, marker: sys._addMarker('rock', x, at + 1.4, rec) });
+        rec.drops.push({ off: (i - (n - 1) / 2) * spacing + rng.range(-0.7, 0.7), at: ROCK_TELEGRAPH + rng.range(0, 0.6),
+          r: rng.range(0.4, 0.9), x: 0, y0: 0, fallT: 0, spawned: false, marker: null });
       }
-      sys._warn('FALLING ROCKS!', 'hazard');
+      const extra = rng.range(0, 0.5 * v);
+      // the spawn height depends on the ground at x: place, recompute the fall times, place again
+      let cx = b.x + 14;
+      for (let pass = 0; pass < 3; pass++) {
+        let need = -Infinity;
+        for (const d of rec.drops) {
+          d.x = cx + d.off;
+          sys._rockDrop(d, vb);
+          need = Math.max(need, b.x + v * (d.at + d.fallT + ROCK_CLEAR) - d.off, b.x + 14 - d.off);
+        }
+        cx = need + extra;
+      }
+      for (const d of rec.drops) {
+        d.x = cx + d.off;
+        sys._rockDrop(d, vb);
+        d.marker = sys._addMarker('rock', d.x, d.at + d.fallT + 1.4, rec);
+      }
+      sys._warn('FALLING ROCKS!', 'hazard', "Don't rush in — let them land");
       return true;
     },
     update(sys, rec) {
@@ -682,6 +716,8 @@
       this.boostPower = 1;
       this.boostSfxCool = 0;
       this.lastInvulnAt = -Infinity;
+      this._ambWarnAt = -Infinity;       // this.time of the last ambient 'HEADWIND!' telegraph
+      this._ambHead = false;             // ambient + storm wind currently past −AMB_WARN_WIND
       this._computeEnv();
     }
 
@@ -1050,20 +1086,33 @@
       if (!run) return;
       if (!run.env || typeof run.env !== 'object') run.env = {};
       const env = run.env, w = this.world, bl = this.blend;
-      let wind = this.ambientWind();
+      let calm = this.ambientWind();                 // ambient + storm term (no gust events)
+      let gusts = 0, gustOn = false;
       let fuelZone = false;
       for (let i = 0; i < this.active.length; i++) {
         const rec = this.active[i];
-        if (rec.id === 'wind_gust') wind += safeNum(rec.value, 0);
+        if (rec.id === 'wind_gust') { gusts += safeNum(rec.value, 0); if (!rec.done) gustOn = true; }
         else if (rec.id === 'fuel_zone' && rec.inside) fuelZone = true;
       }
       if (bl.storm > 0) {
         // two incommensurate sines → strong gusty wind that swings between head- and tailwind
         const t = this.time;
         const osc = 0.72 * Math.sin(t * 0.85 + this.stormPhase) + 0.28 * Math.sin(t * 2.7 + this.stormPhase * 1.7);
-        wind += bl.storm * this.stormAmp * osc;
+        calm += bl.storm * this.stormAmp * osc;
       }
-      env.wind = clamp(safeNum(wind, 0), -20, 20);
+      // telegraph a strong ambient / storm headwind (wind_gust events warn on their own) — qa2-2
+      if (calm < -AMB_WARN_WIND) {
+        if (!this._ambHead) {
+          this._ambHead = true;
+          if (!gustOn && this.time - this._ambWarnAt >= AMB_WARN_COOL && run.mode !== 'attract') {
+            this._ambWarnAt = this.time;
+            this._warn('HEADWIND!', 'info');
+          }
+        }
+      } else if (calm > 1 - AMB_WARN_WIND) {
+        this._ambHead = false;
+      }
+      env.wind = clamp(safeNum(calm + gusts, 0), -20, 20);
       const moonT = w.id === 'moon_base' ? 0.6 : 0.45;
       env.gravityMul = clamp(safeNum(lerp(1, moonT, smoothstep(0, 1, bl.moon)), 1), 0.2, 1.5);
       const d0 = clamp(safeNum(w.darkness, 0), 0, 0.9);
@@ -1080,13 +1129,15 @@
 
     // World wind without events / sections at sim time t (default: now): base × windMul, or — with an
     // ambient gust field — a neutral-to-slightly-resisting mean (0.3·base − 0.15·amp) plus the gusts.
+    // The gust term fades in over the first AMB_RAMP s of the run, so no run opens at a gust peak (qa2-2).
     ambientWind(t) {
       const w = this.world || {};
       const base = safeNum(w.wind && w.wind.base, 0) * this._windMul();
       const amb = safeNum(this.ambAmp, 0);
       if (!(amb > 0)) return base;
       const k = clamp(safeNum(this.ambBossMul, 1), 0, 1);   // damped on an uncleared boss climb
-      return base * 0.3 + k * amb * (this._ambientOsc(isNum(t) ? t : this.time) - 0.15);
+      const tt = isNum(t) ? t : this.time;
+      return base * 0.3 + k * smoothstep(0, AMB_RAMP, tt) * amb * (this._ambientOsc(tt) - 0.15);
     }
 
     // Ambient gust amplitude (m/s²): Storm Planet 6 (≈ 30 % of the time above 4 m/s²), plus
@@ -1205,20 +1256,35 @@
     }
 
     // ---------------------------------------------------------------- rocks
+    // Spawn height d.y0 and fall time d.fallT of a rock drop at d.x: above the view top (+ a margin for the
+    // camera moving before the drop) and ≥ 11 m above the ground, below a cave roof.
+    _rockDrop(d, vb) {
+      const g = this._g();
+      const gx = this._ground(d.x);
+      let y = Math.max(vb.top + d.r + 1.5 + ROCK_VIEW_MARGIN, gx + 11);
+      const ceil = this._ceiling(d.x);
+      if (ceil !== null) y = Math.max(gx + d.r + 2, Math.min(y, ceil - d.r - 0.3));   // drops from the cave roof
+      d.y0 = y;
+      d.fallT = Math.sqrt(2 * Math.max(0.5, y - gx - d.r) / g);
+    }
+
     _spawnRock(d, rec) {
       const p = this._free(this.rocks);
       if (!p) return;
       const g = this._g(), vb = this._view();
+      if (!(d.fallT > 0) || !isNum(d.y0)) this._rockDrop(d, vb);
       const gx = this._ground(d.x);
-      let y = Math.max(vb.top + d.r + 1.5, gx + 11);
-      const ceil = this._ceiling(d.x);
-      if (ceil !== null) y = Math.max(gx + d.r + 2, Math.min(y, ceil - d.r - 0.3));   // drops from the cave roof
-      const fallT = Math.sqrt(2 * Math.max(0.5, y - gx - d.r) / g);
+      const fallT = d.fallT;
+      let y = d.y0;
+      // the camera rose since the warning: enter from above the view instead, already falling
+      if (this._ceiling(d.x) === null && vb.top + d.r + 0.5 > y) y = vb.top + d.r + 1.5;
+      // land at the planned time whatever changed (y − ground − r = −vy·T + ½gT²); 0 in the normal case
+      const vy = -Math.max(0, (y - gx - d.r - 0.5 * g * fallT * fallT) / fallT);
       const vx = this.rng.range(-1.0, 0.5);
       p.active = true;
       p.x = d.x - vx * fallT;     // aim so it lands on its marker
       p.y = y;
-      p.vx = vx; p.vy = 0;
+      p.vx = vx; p.vy = vy;
       p.r = d.r;
       p.rot = this.vrng.range(0, TAU);
       p.av = this.vrng.range(-2, 2);
@@ -1300,10 +1366,10 @@
       if (!hit) return;
       const b = this.run.body;
       p.hitDone = true;
-      // Only a rock coming DOWN on the driver is fatal ("flattened"). A rock that has already landed and
-      // is rolling is a (hefty) obstacle: ramming it knocks the car around instead of ending the run —
-      // otherwise every drop zone the player fails to stop before is an unavoidable death.
-      if (hit === 2 && !(p.landed && p.vy > -4)) {
+      // Only a rock coming DOWN on the driver is fatal ("flattened"). A rock that has already landed —
+      // rolling, or bouncing after the car rammed it — is a (hefty) obstacle: it knocks the car around
+      // instead of ending the run (qa2-4: rocks land before a steady car arrives, so this keeps that safe).
+      if (hit === 2 && !p.landed) {
         this._crash(p.id, p.warnedAt, 'rock');
       } else {
         // knock: push from the rock toward the chassis, stronger for big/fast rocks
@@ -1927,9 +1993,9 @@
       try { if (RR.Audio && typeof RR.Audio.play === 'function') RR.Audio.play(name, opts); } catch (e) { /* audio optional */ }
     }
 
-    _warn(text, kind) {
+    _warn(text, kind, sub) {
       if (this.run.mode === 'attract') return;
-      try { if (typeof this.run.warn === 'function') this.run.warn(text, kind); } catch (e) { logOnce('warn', e); }
+      try { if (typeof this.run.warn === 'function') this.run.warn(text, kind, sub); } catch (e) { logOnce('warn', e); }
       if (kind === 'hazard') this._sfx('warning');
     }
 

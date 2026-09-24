@@ -278,6 +278,22 @@ H.test('12d upgradeCost follows the contract formula', () => {
   H.assert(V.upgradeCost('trail_buggy', 'engine', 1) === 220, 'buggy engine 1→2 = 220');
 });
 
+H.test('12g describeUpgrade effect headlines are player-facing and change from LV1 to LV2 (qa2-14)', () => {
+  for (const id of IDS) {
+    for (const cat of CATS) {
+      const a = V.describeUpgrade(id, cat, 1, {}), b = V.describeUpgrade(id, cat, 2, {});
+      for (const d of [a, b]) {
+        H.assert(typeof d.effect === 'string' && d.effect.length > 3 && typeof d.effectLabel === 'string' && typeof d.effectValue === 'string', id + '/' + cat + ' effect fields');
+        H.assert(!/Nm|ζ|μ|rad\/s/.test(d.effect + d.effectLabel + d.effectValue), id + '/' + cat + ' no engineering units: ' + d.effect);
+      }
+      H.assert(a.effect !== b.effect && a.effectValue !== b.effectValue, id + '/' + cat + ' effect changes LV1 → LV2 (' + a.effect + ' / ' + b.effect + ')');
+    }
+  }
+  H.assert(V.describeUpgrade('trail_buggy', 'suspension', 1, {}).effect === 'Landing softness +0%', 'relative to level 1');
+  H.assert(/^\d+ s of fuel$/.test(V.describeUpgrade('trail_buggy', 'fuel', 3, {}).effect), 'fuel effect ' + V.describeUpgrade('trail_buggy', 'fuel', 3, {}).effect);
+  H.assert(/^Top speed \d+ km\/h$/.test(V.describeUpgrade('trail_buggy', 'engine', 3, {}).effect), 'engine effect');
+});
+
 H.test('12e describeUpgrade and displayStats are readable and increase with upgrades', () => {
   const pattern = {
     engine: /^Torque$/, suspension: /^Damping$/, tires: /^Snow grip$/, fuel: /^Tank$/, grip: /^Grip$/,

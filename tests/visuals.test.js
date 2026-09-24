@@ -39,6 +39,7 @@ function checkingContext(canvas) {
             if (typeof a === 'number' && !Number.isFinite(a)) { rec.bad.push(String(k) + '(' + args.map(String).join(', ') + ')'); break; }
           }
           if (k === 'setTransform') rec.transforms.push(args.slice());
+          if (k === 'fillText') (rec.texts || (rec.texts = [])).push(String(args[0]));
           // a real canvas throws IndexSizeError on negative radii — treat them as failures here too
           if ((k === 'arc' && args[2] < 0) || (k === 'ellipse' && (args[2] < 0 || args[3] < 0)) || (k === 'arcTo' && args[4] < 0)) {
             rec.bad.push('negative radius: ' + String(k) + '(' + args.map(String).join(', ') + ')');
@@ -532,33 +533,47 @@ H.test('Renderer: every decoration type used by any world has a dedicated painte
 });
 
 // ================================================================ review fixes (visuals-1..5, gameplay-3 cross)
-H.test('Renderer: dynamic resolution steps down when slow, back up when fast, ignores gaps (visuals-3)', () => {
+// Feed helpers for the dynamic-resolution monitor. `ms` may be a function of the renderer (fill-bound model).
+function feedFrames(r, ms, seconds, onFrame) {
+  let t = 0;
+  while (t < seconds * 1000) {
+    const v = typeof ms === 'function' ? ms(r) : ms;
+    r.reportFrameTime(v);
+    r.flushResize();
+    t += v;
+    if (onFrame) onFrame(r);
+  }
+}
+
+H.test('Renderer: dynamic resolution steps down when slow, probes back up, ignores gaps (visuals-3, qa2-1)', () => {
   const { el } = stubCanvas(1000, 600);
   CTX.devicePixelRatio = 2;
   const r = new RR.Renderer(el);
-  const feed = (ms, seconds) => { const n = Math.round(seconds * 1000 / ms); for (let i = 0; i < n; i++) r.reportFrameTime(ms); };
+  const feed = (ms, seconds) => feedFrames(r, ms, seconds);
   H.assert(r.autoQuality === true && r.renderScale === 1 && el.width === 2000, 'starts at full scale');
-  feed(25, 1.5);
+  feed(16.67, 3);
+  H.assertClose(r.frameStats().vsync, 16.67, 0.01, 'learns the 60 Hz display period');
+  feed(28, 1.5);
   H.assert(r.renderScale === 1, 'no step before the EMA has been slow for 2 s');
-  feed(25, 1.5);
+  feed(28, 1.5);
   H.assert(r.renderScale === 0.85 && r.dpr === 1.7 && el.width === 1700 && r.w === 1000, 'slow → 0.85 (got ' + r.renderScale + ', ' + el.width + ')');
-  feed(25, 20);
+  feed(28, 30);
   // DPR 2 may go below 0.7 but never below 1 backing px per CSS px
   H.assert(r.renderScale === 0.5 && r.dpr === 1, 'floor on a hi-DPI screen is 1 px/CSS px (got ' + r.renderScale + ')');
   // long gaps (pause, hidden tab) never count as slow frames
   for (let i = 0; i < 50; i++) r.reportFrameTime(900);
   H.assert(r.renderScale === 0.5, 'gaps ignored');
-  feed(10, 4);
-  H.assert(r.renderScale === 0.5, 'needs 5 s of fast frames before stepping up');
-  feed(10, 3);
-  H.assert(r.renderScale === 0.6, 'fast → one step up (got ' + r.renderScale + ')');
+  feed(16.67, 5);
+  H.assert(r.renderScale === 0.5, 'needs 6 s of display-rate frames before probing up');
+  feed(16.67, 2.5);
+  H.assert(r.renderScale === 0.6, 'display-rate frames at 60 Hz → one step up (got ' + r.renderScale + ')');
   // an upgrade undone quickly doubles the next wait (no oscillation)
-  feed(25, 3);
+  feed(28, 4);
   H.assert(r.renderScale === 0.5, 'slow again → back down');
-  feed(10, 6.5);
-  H.assert(r.renderScale === 0.5, 'backed-off: 5 s is no longer enough');
-  feed(10, 5);
-  H.assert(r.renderScale === 0.6, 'backed-off wait of 10 s steps up');
+  feed(16.67, 8);
+  H.assert(r.renderScale === 0.5, 'backed-off: 6 s is no longer enough');
+  feed(16.67, 6);
+  H.assert(r.renderScale === 0.6, 'backed-off wait of 12 s steps up');
   // DPR 1: the fixed-quality floor is 0.7
   CTX.devicePixelRatio = 1;
   r.setQuality('high');
@@ -566,16 +581,114 @@ H.test('Renderer: dynamic resolution steps down when slow, back up when fast, ig
   r.setQuality('medium');
   r.setQuality('high');
   H.assert(r.renderScale === 1 && r.dpr === 1, 'a quality change resets the ladder');
-  feed(30, 30);
+  feed(16.67, 3);
+  // fill-bound device: every step helps, but even the floor is slow
+  const fill = (rr) => 22 + 20 * rr.renderScale * rr.renderScale;
+  feed(fill, 30);
   H.assert(r.renderScale === 0.7, 'DPR 1 floor is 0.7 (got ' + r.renderScale + ')');
-  feed(30, 10);
-  H.assert(r.suggestedQuality === 'medium', 'still slow at the floor → suggests MEDIUM');
+  feed(fill, 10);
+  H.assert(r.suggestedQuality === 'medium', 'still slow at the floor although steps helped → suggests MEDIUM');
   const st = r.frameStats();
   H.assert(st.scale === 0.7 && st.ema > 25 && st.setting === 'high', 'frameStats snapshot');
   r.setAutoQuality(false);
   H.assert(r.renderScale === 1 && el.width === 1000, 'auto off → full scale again');
   feed(30, 10);
   H.assert(r.renderScale === 1, 'auto off → never steps');
+});
+
+H.test('Renderer: a hitch at 60 Hz steps down, then display-rate frames step back up within 20 s (qa2-1 a)', () => {
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  feedFrames(r, 16.67, 20);
+  feedFrames(r, 33, 4);
+  H.assert(r.frameStats().step >= 1, 'the hitch stepped down (step ' + r.frameStats().step + ')');
+  let back = -1, t = 0;
+  feedFrames(r, 16.67, 20, (rr) => { t += 16.67; if (back < 0 && rr.frameStats().step === 0) back = t / 1000; });
+  H.assert(back >= 0 && back <= 20, 'back at step 0 within 20 s (at ' + back + ' s)');
+  H.assert(r.renderScale === 1 && r.suggestedQuality === null, 'full scale, no suggestion');
+});
+
+H.test('Renderer: 50 Hz and 30 Hz displays are not "slow" (no step, no suggestion) (qa2-1 b/c)', () => {
+  for (const q of ['high', 'auto']) {
+    for (const [ms, label] of [[20, '50 Hz'], [33.3, '30 Hz']]) {
+      for (const dpr of [1, 3]) {
+        const { el } = stubCanvas(844, 390);
+        CTX.devicePixelRatio = dpr;
+        const r = new RR.Renderer(el);
+        r.setQuality(q);
+        let maxStep = 0;
+        feedFrames(r, ms, 30, (rr) => { maxStep = Math.max(maxStep, rr.frameStats().step); });
+        const st = r.frameStats();
+        H.assert(st.step === 0 && maxStep === 0 && r.suggestedQuality === null && r.quality === 'high',
+          label + ' ' + q + ' DPR ' + dpr + ': stays at step 0 without a suggestion (step ' + st.step + ', max ' + maxStep + ', ' + r.suggestedQuality + ')');
+        H.assertClose(st.vsync, ms, 0.2, label + ' period learned');
+      }
+    }
+  }
+  // a display whose period was learned at 60 Hz and that then runs capped at 30 Hz: the step bought
+  // nothing and sits on a refresh period → undone, no suggestion
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  feedFrames(r, 16.67, 5);
+  feedFrames(r, 33.3, 30);
+  H.assert(r.frameStats().step === 0 && r.suggestedQuality === null, 'capped display: step undone (step ' + r.frameStats().step + ')');
+  H.assertClose(r.frameStats().vsync, 33.3, 0.2, 'the cap becomes the display period');
+});
+
+H.test('Renderer: a step down that measurably helped is kept (qa2-1 d)', () => {
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  feedFrames(r, 16.67, 20);
+  // 33 ms until the step down, 22 ms afterwards (the step helped, though the device is still a bit slow)
+  let stepped = false;
+  feedFrames(r, (rr) => (rr.frameStats().step >= 1 ? 22 : 33), 12, (rr) => { stepped = stepped || rr.frameStats().step >= 1; });
+  H.assert(stepped, 'stepped down');
+  H.assert(r.frameStats().step >= 1, 'the step is kept (step ' + r.frameStats().step + ')');
+});
+
+H.test("Renderer: AUTO never renders below LOW's 0.75; fixed LOW does not step on DPR 1 (qa2-1 e)", () => {
+  for (const dpr of [1, 2, 3]) {
+    const { el } = stubCanvas(960, 540);
+    CTX.devicePixelRatio = dpr;
+    const r = new RR.Renderer(el);
+    r.setQuality('auto');
+    let minScale = 9, minDpr = 9;
+    feedFrames(r, 16.67, 3);
+    feedFrames(r, (rr) => 22 + 30 * rr.renderScale * rr.renderScale, 60, (rr) => { minScale = Math.min(minScale, rr.renderScale); minDpr = Math.min(minDpr, rr.dpr); });
+    H.assert(r.quality === 'low', 'DPR ' + dpr + ': auto reached LOW (got ' + r.quality + ')');
+    H.assert(minScale >= 0.75 - 1e-9 && minDpr >= 0.75 - 1e-9, 'DPR ' + dpr + ': renderScale never below 0.75 (min ' + minScale + ', dpr ' + minDpr + ')');
+  }
+  const { el } = stubCanvas(960, 540);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  r.setQuality('low');
+  feedFrames(r, 16.67, 3);
+  feedFrames(r, (rr) => 22 + 30 * rr.renderScale * rr.renderScale, 30);
+  H.assert(r.renderScale === 0.75 && r.dpr === 0.75 && r.frameStats().step === 0, 'fixed LOW on DPR 1 stays at 0.75 (got ' + r.renderScale + ')');
+});
+
+H.test('Renderer: a step change resizes the canvas before the next draw, never right after one (qa2-3)', () => {
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  const run = makeRun(RR.Worlds.list[0], VEHICLES[0], {});
+  for (let i = 0; i < 200; i++) r.reportFrameTime(16.67);
+  let n = 0;
+  while (r.renderScale === 1 && n++ < 1000) r.reportFrameTime(40);
+  H.assert(r.renderScale === 0.85, 'a step was taken');
+  H.assert(el.width === 1000 && r.dpr === 1, 'canvas untouched until the next draw (width ' + el.width + ')');
+  r.drawRun(run);
+  H.assert(el.width === Math.round(r.w * r.dpr) && el.width === 850, 'resized at the start of the next drawRun (width ' + el.width + ')');
+  // run-start nudge retries one step higher (applied on the next draw too)
+  r.nudgeUp();
+  H.assert(r.renderScale === 1 && el.width === 850, 'nudgeUp steps up; resize deferred');
+  r.drawRun(run);
+  H.assert(el.width === 1000, 'nudged step applied on draw');
+  r.nudgeUp();
+  H.assert(r.renderScale === 1, 'nudgeUp at step 0 is a no-op');
 });
 
 H.test("Renderer: quality 'auto' walks down through MEDIUM and LOW and syncs the run (visuals-3)", () => {
@@ -585,14 +698,93 @@ H.test("Renderer: quality 'auto' walks down through MEDIUM and LOW and syncs the
   const hints = [];
   r.onQualityHint = (q) => hints.push(q);
   r.setQuality('auto');
-  for (let i = 0; i < Math.round(40000 / 30); i++) r.reportFrameTime(30);
+  feedFrames(r, 28, 40);
   H.assert(r.quality === 'low', 'auto ends on LOW when always slow (got ' + r.quality + ')');
   H.assert(hints.join(',') === 'medium,low', 'quality hints: ' + hints.join(','));
   const run = makeRun(RR.Worlds.list[0], VEHICLES[0], {});
   r.drawRun(run);
   H.assert(run.background.quality === 'low' && run.particles.quality === 'low', 'auto mode keeps the run background/particles on the ladder quality');
-  for (let i = 0; i < Math.round(80000 / 8); i++) r.reportFrameTime(8);
+  feedFrames(r, 8, 80);
   H.assert(r.quality === 'high' && r.renderScale === 1, 'fast again → back to HIGH at full scale (got ' + r.quality + ' ' + r.renderScale + ')');
+});
+
+H.test('Renderer: daily runs label the flag BEST TODAY and draw a GOAL banner at the target (qa2-7)', () => {
+  const world = RR.Worlds.list[0];
+  const draw = (runOpts, x) => {
+    const { el, rec } = stubCanvas(960, 540);
+    CTX.devicePixelRatio = 1;
+    const r = new RR.Renderer(el);
+    const run = makeRun(world, VEHICLES[0], { x: x || 55, run: runOpts });
+    rec.texts = [];
+    r.drawRun(run);
+    assertClean(rec, 'daily flags');
+    return { texts: rec.texts, r };
+  };
+  const daily = { mode: 'daily', bestLabel: 'BEST TODAY', bestDistance: 50, distance: 40, daily: { targetDistance: 60, day: '2026-09-24' } };
+  let d = draw(daily);
+  H.assert(d.texts.includes('BEST TODAY'), 'daily flag says BEST TODAY: ' + d.texts.join('|'));
+  H.assert(d.texts.includes('GOAL'), 'daily target has a GOAL banner: ' + d.texts.join('|'));
+  H.assert(!d.texts.includes('BEST'), 'no plain BEST on a daily');
+  // best and goal within 4 m → only GOAL
+  d = draw(Object.assign({}, daily, { bestDistance: 58 }));
+  H.assert(d.texts.includes('GOAL') && !d.texts.includes('BEST TODAY'), 'close flags → GOAL only: ' + d.texts.join('|'));
+  // target reached this run → no goal banner
+  d = draw(Object.assign({}, daily, { distance: 61 }), 58);
+  H.assert(!d.texts.includes('GOAL'), 'no GOAL once the target is passed');
+  // challenge already completed today → no goal banner
+  const prev = RR.Daily;
+  RR.Daily = { status: () => ({ day: '2026-09-24', completed: true, best: 900, attempts: 2 }) };
+  try {
+    d = draw(daily);
+    H.assert(!d.texts.includes('GOAL') && d.texts.includes('BEST TODAY'), 'completed daily → no GOAL: ' + d.texts.join('|'));
+  } finally { RR.Daily = prev; }
+  // normal run: plain BEST, never GOAL
+  d = draw({ mode: 'normal', bestLabel: 'BEST', bestDistance: 50, distance: 40, daily: { targetDistance: 60 } });
+  H.assert(d.texts.includes('BEST') && !d.texts.includes('GOAL'), 'normal run draws BEST only: ' + d.texts.join('|'));
+  d = draw({ mode: 'normal', bestDistance: 50, distance: 40 });
+  H.assert(d.texts.includes('BEST'), 'missing bestLabel → BEST');
+});
+
+H.test('Renderer: front decorations skip glows and fade where they overlap the car (qa2-10)', () => {
+  const world = RR.Worlds.byId('storm_planet');
+  const { el, ctx, rec } = stubCanvas(960, 540);
+  const alphas = [];
+  const r = new RR.Renderer(el);
+  const b = { left: -20, right: 40, bottom: -10, top: 12 };
+  const T = (layer, x) => ({ decorations: [{ x, y: 0, type: 'crystal', scale: 0.7, layer, variant: 0 }] });
+  const run = (layer, x, carX) => {
+    rec.ops.drawImage = 0; alphas.length = 0;
+    const px = new Proxy(ctx, { set(t, k, v) { if (k === 'globalAlpha') alphas.push(v); t[k] = v; return true; }, get(t, k) { const v = t[k]; return typeof v === 'function' ? v.bind(t) : v; } });
+    r._drawDecorations(px, T(layer, x), world, 1, layer, b, 40, carX);
+    return { glows: rec.ops.drawImage || 0, minAlpha: alphas.length ? Math.min(...alphas) : 1 };
+  };
+  const back = run('back', 10, NaN);
+  H.assert(back.glows > 0, 'back-layer crystal draws its glow (' + back.glows + ')');
+  const frontFar = run('front', 30, 10);
+  H.assert(frontFar.glows === 0 && frontFar.minAlpha === 1, 'front layer: no additive glow, opaque away from the car');
+  const frontOver = run('front', 10.5, 10);
+  H.assert(frontOver.glows === 0 && frontOver.minAlpha <= 0.35 + 1e-9, 'front prop over the car drawn at 35 % (' + frontOver.minAlpha + ')');
+  const again = run('back', 10, NaN);
+  H.assert(again.glows > 0, 'glows come back for the next back-layer pass');
+});
+
+H.test('Renderer: Black Ice daily (frictionMul < 0.8) glazes every surface but lava (qa2-13)', () => {
+  const wc = RR.Renderer.worldColors;
+  H.assert(typeof wc === 'function', 'RR.Renderer.worldColors exported');
+  for (const world of RR.Worlds.list) {
+    const base = wc(world), ice = wc(world, true);
+    H.assert(ice !== base && ice.ice === true && !base.ice, world.id + ': separate ice palette');
+    H.assert(ice.surf[ice.main].top === '#c4e8ff', world.id + ': main surface top is SURF.ice.top (' + ice.surf[ice.main].top + ')');
+    H.assert(ice.surf.grass.top === '#c4e8ff' && ice.surf.lava.top === base.surf.lava.top, world.id + ': alt surfaces glazed, lava stays lava');
+    H.assert(wc(world, true) === ice && wc(world) === base, world.id + ': both palettes cached');
+    H.assert(base.surf[base.main].top !== '#c4e8ff' || world.surface === 'ice', world.id + ': normal palette untouched');
+  }
+  // drawRun picks the ice palette from run.modifiers and still draws cleanly
+  const { el, rec } = stubCanvas(960, 540);
+  const r = new RR.Renderer(el);
+  const run = makeRun(RR.Worlds.list[0], VEHICLES[0], { run: { modifiers: { frictionMul: 0.55 } } });
+  r.drawRun(run);
+  assertClean(rec, 'ice drawRun');
 });
 
 H.test('Renderer: LOW darkness draws directly (no light-map blit), HIGH keeps the light map (visuals-3)', () => {

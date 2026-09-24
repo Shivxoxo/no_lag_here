@@ -16,6 +16,10 @@
  *  - special.force is the `controls.boost` value Run should apply while the special is active
  *    (1 ⇒ ≈ 0.9 g of forward thrust along the chassis).
  *  - describeUpgrade() also returns {detail, amount}; displayStats() values are floats in 0..10.
+ *  - (qa2-14) describeUpgrade() also returns a player-facing headline without engineering units, relative to
+ *    level 1 of the same category: effect ('Top speed 82 km/h', 'Landing softness +8%', 'Snow grip 68%',
+ *    '23 s of fuel', 'Climbs 44° slopes', 'Flip speed +8%', 'Stopping power +8%') and its parts effectLabel /
+ *    effectValue (the garage shows "label  current › next" with the old `value` as a small second line).
  *  - (review fixes) describeUpgrade(vehicleId, catId, level, upgrades?) describes `catId` at `level` with the
  *    OTHER categories at the player's levels (4th argument, else RR.Save.data.upgrades[vehicleId], else stock),
  *    so the ENGINE/TIRES top speed and the next-level preview match the real car. TIRES now headlines
@@ -408,8 +412,39 @@
       base = (S && S[vehicleId] && typeof S[vehicleId] === 'object' && S[vehicleId]) || null;
     }
     const t = getTuned(vehicleId, Object.assign({}, base, { [catId]: lv }));
-    // reference for the TIRES rolling-resistance %: same car with stock tyres
-    const stock = catId === 'tires' ? getTuned(vehicleId, Object.assign({}, base, { tires: 1 })) : t;
+    // reference: the same car with this category at level 1 (TIRES rolling resistance %, player-facing effects)
+    const stock = getTuned(vehicleId, Object.assign({}, base, { [catId]: 1 }));
+    const d = describeRaw(t, stock, catId);
+    const e = upgradeEffect(t, stock, catId);
+    d.effectLabel = e[0];
+    d.effectValue = e[1];
+    d.effect = e[2] || e[0] + ' ' + e[1];
+    return d;
+  }
+
+  // Player-facing headline for a garage row (qa2-14): no engineering units, relative to level 1 of the same
+  // category → [label, value, full text?].
+  function upgradeEffect(t, t1, catId) {
+    const pct = (a, b) => '+' + Math.max(0, Math.round((a / b - 1) * 100)) + '%';
+    switch (catId) {
+      case 'engine': return ['Top speed', kmh(t.topSpeed) + ' km/h'];
+      case 'suspension': return ['Landing softness', pct(t.suspension.zeta, t1.suspension.zeta)];
+      case 'tires': {
+        const snow = (RR.SURFACES && RR.SURFACES.snow && RR.SURFACES.snow.friction) || 0.62;
+        return ['Snow grip', Math.round(U.lerp(snow, 1, t.surfaceAdapt * 0.5) * 100) + '%'];
+      }
+      case 'fuel': {
+        const sec = Math.round(t.fuel.capacity / (t.fuel.burnRate + t.fuel.idleBurn)) + ' s';
+        return ['Full-throttle fuel', sec, sec + ' of fuel'];
+      }
+      case 'grip': return ['Climbs', Math.round(Math.atan(t.grip) * 180 / Math.PI) + '° slopes'];
+      case 'air': return ['Flip speed', pct(t.airTorque / t.inertiaEff, t1.airTorque / t1.inertiaEff)];
+      case 'brakes':
+      default: return ['Stopping power', pct(t.brakeTorque, t1.brakeTorque)];
+    }
+  }
+
+  function describeRaw(t, stock, catId) {
     switch (catId) {
       case 'engine':
         return { stat: 'Torque', value: U.formatInt(t.motor.torque) + ' Nm',

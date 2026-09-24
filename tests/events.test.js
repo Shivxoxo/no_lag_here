@@ -441,6 +441,49 @@ H.test('falling rocks: warning + markers first, rocks hurt only after ≥ 1.5 s,
   else H.assert(run.body.impulses.length >= 1, 'knock impulse');
 });
 
+// qa2-4: rocks are down ≥ 0.9 s before a car holding its speed reaches them (keep driving is safe).
+H.test('falling rocks land before a steady-speed car arrives (10/15/20 m/s, 20 seeds each)', () => {
+  let drops = 0, worstGap = Infinity;
+  for (const v of [10, 15, 20]) {
+    for (let seed = 1; seed <= 20; seed++) {
+      const run = forcedRun('rocky_highlands', { flat: true, seed: seed * 7 + v });
+      const ev = run.events;
+      run.body.vx = v;
+      H.assert(ev.forceEvent('falling_rocks'), 'forced');
+      const rec = ev.active[0];
+      H.assert(run.log.warns[0].text === 'FALLING ROCKS!', 'warning text unchanged');
+      const t0 = run.time;
+      const landAt = new Map(), arriveAt = new Map();
+      const owner = new Map();
+      for (let i = 0; i < 60 * 10; i++) {
+        stepRun(run, DT, v);
+        const t = run.time - t0;
+        for (const p of ev.rocks) {
+          if (!p.active || p.owner !== rec) continue;
+          if (!owner.has(p)) {
+            // the rock spawned this frame: match it to its drop by the aimed landing x
+            let best = null, bd = Infinity;
+            for (const d of rec.drops) { const e = Math.abs(p.x + p.vx * d.fallT - d.x); if (!owner.has(d) && e < bd) { bd = e; best = d; } }
+            owner.set(p, best); owner.set(best, p);
+          }
+          const d = owner.get(p);
+          if (p.landed && !landAt.has(d)) landAt.set(d, t);
+        }
+        for (const d of rec.drops) if (!arriveAt.has(d) && run.body.x >= d.x) arriveAt.set(d, t);
+      }
+      for (const d of rec.drops) {
+        H.assert(landAt.has(d) && arriveAt.has(d), 'v ' + v + ' seed ' + seed + ': drop landed and was reached');
+        const gap = arriveAt.get(d) - landAt.get(d);
+        worstGap = Math.min(worstGap, gap);
+        H.assert(gap >= 0.9 - 0.05, 'v ' + v + ' seed ' + seed + ': rock down ' + gap.toFixed(2) + ' s before the car (need ≥ 0.9)');
+        drops++;
+      }
+      H.assert(run.log.crashes.length === 0, 'v ' + v + ' seed ' + seed + ': a steady car is never crushed');
+    }
+  }
+  H.assert(drops > 150, 'enough drops checked (' + drops + ', worst gap ' + worstGap.toFixed(2) + ' s)');
+});
+
 H.test('meteor shower (Moon): telegraph, knock/crash only after ≥ 1.5 s, scorch craters', () => {
   const run = forcedRun('moon_base');
   const ev = run.events;
@@ -599,6 +642,46 @@ H.test('ambient wind: Storm Planet strong & gusty, Gale Force / Chaos felt, norm
     const base = RR.Worlds.byId(id).wind.base || 0;
     H.assert(W.every((w) => w === base), id + ' keeps its steady base wind');
   }
+});
+
+// qa2-2: no run opens at a gust peak; a strong ambient headwind is telegraphed (never on top of a gust).
+H.test('ambient wind fades in over the first seconds; strong headwinds warn HEADWIND! (≤ 1 per 12 s)', () => {
+  for (const [id, mods] of [['storm_planet', null], ['green_valley', { windMul: 2.5 }], ['desert_canyon', { windMul: 1.8 }]]) {
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const ev = forcedRun(id, { modifiers: mods, seed }).events;
+      const base = (RR.Worlds.byId(id).wind.base || 0) * ((mods && mods.windMul) || 1) * 0.3;
+      for (let t = 0; t < 1; t += 0.02) {
+        const a = Math.abs(ev.ambientWind(t) - base);
+        H.assert(a <= 0.1 * ev.ambAmp + 1e-9, id + ' seed ' + seed + ': ambient term at t=' + t.toFixed(2) + ' is ' + a.toFixed(2) + ' (amp ' + ev.ambAmp + ')');
+      }
+      // after the ramp the field is at full strength
+      H.assertClose(ev.ambientWind(20) - base, ev.ambAmp * (ev._ambientOsc(20) - 0.15), 1e-9, 'full field after the ramp');
+    }
+  }
+  // telegraph: a 5-minute Storm Planet drive with the scheduler off
+  const run = forcedRun('storm_planet', { seed: 4 });
+  const ev = run.events;
+  let below = 0;
+  for (let i = 0; i < 60 * 300; i++) {
+    stepRun(run, DT, 0);
+    if (run.env.wind < -3) below++;
+  }
+  const heads = run.log.warns.filter((w) => w.text === 'HEADWIND!');
+  H.assert(below > 0 && heads.length >= 3, 'headwinds are telegraphed (' + heads.length + ' warnings, ' + below + ' frames < −3)');
+  H.assert(heads.every((w) => w.kind === 'info'), 'info kind (no hazard siren)');
+  for (let i = 1; i < heads.length; i++) H.assert(heads[i].t - heads[i - 1].t >= 12 - 1e-6, 'at most one per 12 s');
+  // never on top of an active wind_gust warning
+  const run2 = forcedRun('storm_planet', { seed: 4 });
+  const ev2 = run2.events;
+  ev2.ambientWind = () => (run2.time > 1 ? -8 : 0);
+  H.assert(ev2.forceEvent('wind_gust'), 'gust forced');
+  run2.log.warns.length = 0;
+  for (let i = 0; i < 60 * 3; i++) stepRun(run2, DT, 0);
+  H.assert(!run2.log.warns.some((w) => w.text === 'HEADWIND!'), 'no HEADWIND! while a gust is active');
+  // attract mode stays silent
+  const run3 = forcedRun('storm_planet', { seed: 4, mode: 'attract' });
+  for (let i = 0; i < 60 * 120; i++) stepRun(run3, DT, 0);
+  H.assert(run3.log.warns.length === 0, 'attract mode never warns');
 });
 
 H.test('coin storm, bird pouch, steep surprise, fuel zone: rewards are real and bounded', () => {

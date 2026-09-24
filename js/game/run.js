@@ -58,6 +58,13 @@
  *  - Camera: passes target.slopeAhead (ground rise/run 12 m ahead) and sets camera.bottomInset to 0 when
  *    the touch controls are hidden (RR.Input.touchVisible === false) or in attract mode, else null (default).
  *  - Terrain is trimmed 500 m behind the car (TRIM_BEHIND).
+ *  - run.crashPose ('roof' | 'tail' | 'nose' for 'flipped', else null) and run.crashRel (rad, body angle vs
+ *    the slope at the crash, + = nose up) are set on every crash and copied into the summary (qa2-11).
+ *  - Wind (qa2-2): physics gets env.wind with the headwind soft-capped — linear to −3 m/s², then saturating
+ *    toward −5 (HEADWIND_SOFT / HEADWIND_CAP), tailwind ≤ +20 — so a stock car at full throttle on flat
+ *    ground never stalls or rolls back in Storm Planet / Gale Force / Chaos; both limits scale with the
+ *    physics gravity below 1 g (MOON sections: traction shrinks, the wind does not). run.physWind = that value;
+ *    env.wind stays uncapped for the storm visuals.
  */
 (function () {
   'use strict';
@@ -101,6 +108,10 @@
   const JUMP_COOL = 0.45;
   const JUMP_PAD_WINDOW = 0.3;         // events already played a pad/ramp 'jump' this recently → stay quiet
   const ATTRACT_STUCK_TIME = 6;
+  // Headwind the PHYSICS sees (qa2-2): linear to −3 m/s², then saturating softly toward −5 so a stock car at
+  // full throttle on flat ground always keeps moving (−8 stalled it, −9.5 rolled it back). env.wind itself
+  // stays uncapped for rain / streaks / particles / clouds; tailwinds pass up to +20.
+  const HEADWIND_SOFT = 3, HEADWIND_CAP = 5;
   const SPECIAL_REQ_MS = 300;
   const PARTICLE_CAP = { low: 220, medium: 450, high: 800 };
   const QUALITY_RATE = { low: 0.4, medium: 0.7, high: 1 };
@@ -303,6 +314,7 @@
       this.state = 'running';
       this.time = 0;
       this.simTime = 0;
+      this.physWind = 0;                 // wind (m/s²) the physics got last frame (headwind soft-capped)
       this.distance = 0;
       this.fuel = this.fuelMax;
       this.coins = 0;
@@ -319,6 +331,8 @@
       this.boostActive = false;
       this.megaTime = 0;
       this.crashReason = null;
+      this.crashPose = null;             // 'roof' | 'tail' | 'nose' for a 'flipped' crash
+      this.crashRel = 0;                 // body angle vs the slope at the crash (rad, + = nose up)
       this.endReason = null;
       this.newRecord = false;
       this.newDailyBest = false;
@@ -422,7 +436,14 @@
       const pe = this._physEnv;
       pe.terrain = this.terrain;
       pe.gravity = this.env.gravity * clamp(safeNum(this.env.gravityMul, 1), 0.1, 3);
-      pe.wind = clamp(safeNum(this.env.wind, 0), -30, 30);
+      // the cap scales with gravity below 1 g (MOON sections / low-gravity worlds): traction shrinks with g
+      // while the wind does not, so −5 m/s² on the moon would still pin a car on a mild climb
+      const gk = clamp(pe.gravity / CONST.GRAVITY, 0.3, 1);
+      const soft = HEADWIND_SOFT * gk, cap = HEADWIND_CAP * gk;
+      let w = clamp(safeNum(this.env.wind, 0), -30, 20);
+      if (w < -soft) w = -soft - (cap - soft) * Math.tanh((-w - soft) / (cap - soft));
+      pe.wind = w;
+      this.physWind = w;
       pe.frictionMul = this.modifiers.frictionMul;
       pe.airDrag = this.env.airDrag;
       pe.sensitivity = this._sens;
@@ -775,6 +796,13 @@
       const b = this.body;
       this.state = 'crashed';
       this.crashReason = reason;
+      // pose at the crash (qa2-11/12): body angle relative to the local slope (+ = nose up) and, for
+      // 'flipped', which way up it ended — 'roof' (> 110°), 'tail' (nose up) or 'nose'
+      const T = this.terrain;
+      let rel = 0;
+      try { rel = U.wrapAngle(safeNum(b.angle, 0) - Math.atan(safeNum(T && T.slopeAt ? T.slopeAt(b.x) : 0, 0))); } catch (e) { rel = 0; }
+      this.crashRel = safeNum(rel, 0);
+      this.crashPose = reason === 'flipped' ? (Math.abs(rel) > 110 * PI / 180 ? 'roof' : rel > 0 ? 'tail' : 'nose') : null;
       this._crashTimer = CRASH_TIME;
       this._flipT = 0; this._standT = 0;
       this._specialTime = 0;
@@ -921,6 +949,8 @@
         bossCleared: fin(this.stats.bossCleared),
         endReason: this.endReason || (this.state === 'crashed' ? 'crash' : this.state === 'nofuel' ? 'fuel' : 'quit'),
         crashReason: this.crashReason || null,
+        crashPose: this.crashPose || null,
+        crashRel: this.crashReason ? Math.round(safeNum(this.crashRel, 0) * 1000) / 1000 : 0,
         time: Math.round(fin(this.time) * 100) / 100,
         missionsCompleted: this._missionTexts.slice(),
         seed: this.seed,
@@ -1071,9 +1101,9 @@
       this._hud('banner', title, sub, kind);
     }
 
-    warn(text, kind) {
+    warn(text, kind, sub) {
       if (this.attract || this._destroyed) return;
-      this._hud('warning', text, kind);
+      this._hud('warning', text, kind, sub);
     }
 
     // ================================================================ per-frame helpers
@@ -1099,8 +1129,8 @@
       const P = this.particles, w = b.wheels && b.wheels[0];
       if (P && w) {
         const surf = w.surface || null;
-        const type = surf ? surf.type : 'dirt';
-        const col = (surf && surf.dust) || this.world.dustColor || '#9b7b4f';
+        const type = this._ptype(surf);
+        const col = type === 'ice' ? '#e6f4ff' : (surf && surf.dust) || this.world.dustColor || '#9b7b4f';
         const gx = w.x, gy = safeNum(this.terrain.heightAt(w.x), w.y - w.radius);
         this._opts(b.vx * 0.15, 0.6, 2.2, PI / 2 + (b.vx >= 0 ? 0.5 : -0.5), 1.4, col, 0, 0);
         P.emit(type === 'snow' || type === 'ice' ? 'snow' : type === 'mud' ? 'splash' : 'dust', gx, gy + 0.05, Math.max(4, Math.round(8 * this._qRate)), this._po);
@@ -1188,8 +1218,8 @@
         const w = b.wheels[i];
         if (!w || !w.grounded) { this._dustAcc[i] = 0; continue; }
         const surf = w.surface || null;
-        const type = surf ? surf.type : 'dirt';
-        const col = (surf && surf.dust) || wDust;
+        const type = this._ptype(surf);
+        const col = type === 'ice' ? '#e6f4ff' : (surf && surf.dust) || wDust;
         const nx = safeNum(w.nx, 0), ny = safeNum(w.ny, 1);
         const px = w.x - nx * w.radius, py = w.y - ny * w.radius;
         const slip = safeNum(w.slip, 0);
@@ -1271,6 +1301,13 @@
           }
         }
       }
+    }
+
+    // Particle flavour of a wheel's surface: on a Black Ice daily (frictionMul < 0.8) everything but lava
+    // sprays ice, matching the renderer's glazed look (qa2-13).
+    _ptype(surf) {
+      const type = surf ? surf.type : 'dirt';
+      return type !== 'lava' && this.modifiers && this.modifiers.frictionMul < 0.8 ? 'ice' : type;
     }
 
     // Surface-flavoured wheel particles (called with a small count at a quality-scaled rate).

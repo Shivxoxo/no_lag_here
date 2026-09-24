@@ -2,6 +2,7 @@
  *
  *   NODE_PATH=/opt/node22/lib/node_modules node tests/smoke.js        (npm run smoke)
  *   SMOKE_ONLY=file|http   run a single transport     SMOKE_QUICK=1   shorter real-time driving
+ *   SMOKE_SCENARIO=qa2,shell   run only the scenarios whose name contains one of these
  *
  * Runs the whole suite twice: against file://…/index.html (primary) and against a static HTTP server
  * started in-process (node http). Every page fails the suite on ANY console error or page error.
@@ -18,6 +19,11 @@
  * midnight is expired (not credited to the new day), level-ups survive leaving results early, garage
  * RIDE AGAIN / vehicle UPGRADE / BACK routes, frozen attract behind menu screens, Tab keeps the run
  * playing, one confirm per double activation, sliding thumb hands GAS over to TILT, no keycaps on touch.
+ * Second QA pass: 60 Hz keeps full render scale, R past a daily target toasts the reward, daily modifier chip,
+ * HUD pause by mouse and by a second finger while GAS is held, vehicle-card UPGRADE rebuilds the attract car,
+ * garage effect headlines, pose-aware crash caption + coaching + "no tricks" tip, 40 px landscape buttons.
+ *
+ *   NODE_PATH defaults (npm run smoke) to the global node_modules (npm root -g).
  */
 'use strict';
 const path = require('path');
@@ -29,6 +35,7 @@ const ROOT = path.resolve(__dirname, '..');
 const FILE_URL = 'file://' + path.join(ROOT, 'index.html');
 const QUICK = !!process.env.SMOKE_QUICK;
 const ONLY = process.env.SMOKE_ONLY || '';
+const PICK = process.env.SMOKE_SCENARIO || '';      // e.g. SMOKE_SCENARIO=qa2,shell (substring of the scenario name)
 const SAVE_KEY = 'ridgeRush.save.v1';
 
 let passed = 0, failed = 0;
@@ -750,10 +757,125 @@ async function scenarioShell(browser, url, T) {
   await closePage(p);
 }
 
+// Second QA pass (qa2-*): daily toast on R, HUD modifier chip, pause button (mouse + multi-touch), garage
+// UPGRADE keeps the attract car in sync, pose-aware crash captions, results tip + coaching, landscape floors.
+async function scenarioQa2(browser, url, T) {
+  console.log('  [' + T + '] second QA pass: daily banked on R, pause button, garage attract, results coaching, dynamic resolution');
+  const p = await openPage(browser, url, null, T + ' qa2');
+  const { page } = p;
+  await ev(page, () => {
+    RR.Save.data.seenTutorial = true; RR.Save.save();
+    window.__toasts = [];
+    new MutationObserver(() => document.querySelectorAll('#toasts > *').forEach((e) => { if (!e.__s) { e.__s = 1; window.__toasts.push(e.textContent); } }))
+      .observe(document.getElementById('toasts'), { childList: true, subtree: true });
+  });
+  // dynamic resolution at the (vsync-locked) headless 60 Hz: the period is learned, nothing steps down
+  await sleep(1500);
+  const fs0 = await ev(page, () => RR.Game.renderer.frameStats());
+  ok(fs0.step === 0 && fs0.scale === 1 && fs0.suggested === null, 'menu at 60 Hz: dynamic resolution stays at full scale (vsync ' + (fs0.vsync || 0).toFixed(1) + ' ms)');
+  // daily run: modifier chip under GOAL, then R past the target toasts the completed challenge (qa2-8, qa2-13)
+  const dl = await ev(page, () => {
+    const ch = RR.Daily.getChallenge();
+    RR.Game.startRun({ worldId: ch.worldId, daily: ch });
+    const m = document.querySelector('#hud [data-h="mods"]');
+    return { labels: (ch.modifiers.labels || []).join(' · '), chip: m ? m.textContent : null, on: m ? m.classList.contains('on') : false, target: ch.targetDistance };
+  });
+  await waitState(page, 'playing');
+  ok(dl.labels && dl.chip === dl.labels && dl.on, 'daily HUD shows the modifier chip under GOAL ("' + dl.chip + '")');
+  const coins0 = await ev(page, () => RR.Save.data.coins);
+  await ev(page, (t) => { RR.Game.run.distance = t + 12; }, dl.target);
+  await page.keyboard.press('KeyR');
+  await sleep(500);
+  const dt = await ev(page, () => ({ toasts: window.__toasts.slice(), completed: RR.Daily.status().completed, coins: RR.Save.data.coins, state: RR.Game.state }));
+  ok(dt.completed && dt.state === 'playing' && dt.toasts.some((t) => /Daily challenge complete! \+[\d,]+ coins/.test(t)),
+    'R past the daily target banks it with a "Daily challenge complete" toast (+' + (dt.coins - coins0) + ' coins; ' + dt.toasts.slice(-2).join(' | ') + ')');
+  // HUD pause button: one mouse click pauses exactly once (qa2-5)
+  await ev(page, () => { window.__pauses = 0; const o = RR.Game.pause; RR.Game.pause = function () { window.__pauses++; return o.apply(this, arguments); }; });
+  await page.click('#hud .hud-pause');
+  await sleep(300);
+  ok((await state(page)) === 'paused' && (await ev(page, () => window.__pauses)) === 1, 'HUD pause button: a mouse click pauses exactly once');
+  await clickAct(page, 'resume');
+  await waitState(page, 'playing');
+  // results: pose-aware caption, the "no tricks" tip next to the combo chip, and a coaching line (qa2-11/12)
+  await ev(page, () => RR.Game.quitToMenu('menu'));
+  await waitScreen(page, 'menu');
+  await sleep(500);
+  while (await ev(page, () => RR.UI.modalOpen)) { await modalOk(page); await sleep(300); }
+  const res = await ev(page, () => {
+    const sm = { worldId: 'green_valley', vehicleId: 'trail_buggy', mode: 'normal', endReason: 'crash', crashReason: 'flipped', crashPose: 'tail', crashRel: 1.4,
+      distance: 120, coins: 30, bonusCoins: 0, tokens: 0, trickXp: 0, bossXp: 0, maxCombo: 5, tricks: {}, perfectLandings: 0, time: 30 };
+    RR.Save.data.stats.runs = 3;
+    RR.UI.showResults(sm, RR.Progression.computeRunRewards(sm), null, null);
+    const q = (s) => document.querySelector('.scr-results ' + s);
+    return { reason: q('[data-ref="reason"]').textContent, coach: q('[data-ref="coach"]').hidden ? '' : q('[data-ref="coach"]').textContent,
+      tip: !!q('[data-ref="tricks"] .empty'), combo: !!q('[data-ref="tricks"] .trick-chip.combo') };
+  });
+  ok(/Stood on its tail too long/.test(res.reason), 'results caption for a tail stand: "' + res.reason + '"');
+  ok(res.tip && res.combo, 'results show the "no tricks" tip together with the combo chip');
+  ok(/Ease off W on the ground/.test(res.coach), 'results coaching line for a new player: "' + res.coach + '"');
+  const res2 = await ev(page, () => {
+    const sm = { worldId: 'green_valley', vehicleId: 'trail_buggy', mode: 'normal', endReason: 'crash', crashReason: 'head', crashRel: -0.9, distance: 80, coins: 0, maxCombo: 0, tricks: { backflip: 1 }, time: 20 };
+    RR.UI.showResults(sm, RR.Progression.computeRunRewards(sm), null, null);
+    const c1 = document.querySelector('.scr-results [data-ref="coach"]').textContent;
+    RR.Save.data.stats.runs = 40;
+    RR.UI.showResults(sm, RR.Progression.computeRunRewards(sm), null, null);
+    return { c1, hidden: document.querySelector('.scr-results [data-ref="coach"]').hidden, tip: !!document.querySelector('.scr-results [data-ref="tricks"] .empty') };
+  });
+  ok(/Nose-dived/.test(res2.c1) && res2.hidden && !res2.tip, 'head crash nose-down coaching; hidden after 10 runs; no tip when a trick landed');
+  await ev(page, () => RR.Game.quitToMenu('menu'));
+  await waitScreen(page, 'menu');
+  // garage via vehicle-card UPGRADE selects that vehicle and rebuilds the menu attract car (qa2-9)
+  await ev(page, () => { const d = RR.Save.data; if (d.unlockedVehicles.indexOf('mountain_truck') < 0) d.unlockedVehicles.push('mountain_truck'); d.selectedVehicle = 'trail_buggy'; RR.Save.save(); RR.Game.refreshAttract(); });
+  await sleep(400);
+  // (the card button is only shown on the selected car; open the route with another owned car directly)
+  await ev(page, () => RR.UI.show('garage', { from: 'vehicles', vehicleId: 'mountain_truck' }));
+  await waitScreen(page, 'garage');
+  await sleep(500);
+  const ga = await ev(page, () => ({ sel: RR.Save.data.selectedVehicle, attract: RR.Game.attract && RR.Game.attract.vehicleId }));
+  ok(ga.sel === 'mountain_truck' && ga.attract === 'mountain_truck', 'garage opened for another car: selected ' + ga.sel + ', attract car ' + ga.attract);
+  const up = await ev(page, () => ({ eff: document.querySelector('.scr-garage [data-ref="eff_engine"]').textContent, cur: document.querySelector('.scr-garage [data-ref="cur_engine"]').textContent,
+    det: document.querySelector('.scr-garage [data-ref="det_engine"]').textContent }));
+  ok(up.eff === 'Top speed' && /km\/h$/.test(up.cur) && /Nm/.test(up.det), 'garage rows headline the effect (' + up.eff + ' ' + up.cur + '), technical value in small print (' + up.det + ')');
+  await closePage(p);
+
+  // multi-touch: a second-finger tap on ❚❚ while GAS is held pauses and releases the gas (qa2-5); landscape floors (qa2-6)
+  const m = await openPage(browser, url, { viewport: { width: 740, height: 360 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 }, T + ' qa2 touch');
+  const mp = m.page;
+  await ev(mp, () => { RR.Save.data.seenTutorial = true; RR.Save.save(); RR.UI.show('settings'); });
+  await waitScreen(mp, 'settings');
+  await sleep(700);
+  // toggles keep a 30 px track with a 6 px invisible hit pad (::after) → ≥ 42 px targets
+  const small = await ev(mp, () => [...document.querySelectorAll('.screen.active button, .screen.active .btn-back')].filter((b) => {
+    const r = b.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    const pad = b.classList.contains('toggle') ? -2 * (parseFloat(getComputedStyle(b, '::after').top) || 0) : 0;
+    return r.height + pad < 39.5;
+  }).map((b) => (b.getAttribute('aria-label') || b.textContent).trim().slice(0, 16) + ' ' + Math.round(b.getBoundingClientRect().height)));
+  ok(small.length === 0, 'landscape phone settings: every tap target ≥ 40 px tall' + (small.length ? ' → ' + small.join(', ') : ''));
+  await ev(mp, () => RR.Game.startRun({ worldId: 'green_valley', vehicleId: 'trail_buggy' }));
+  await waitState(mp, 'playing');
+  const cdp = await m.ctx.newCDPSession(mp);
+  const gasPt = await touchCenter(mp, '#touch-controls [data-tc="gas"]');
+  const pausePt = await touchCenter(mp, '#hud .hud-pause');
+  const T1 = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([id, q]) => ({ x: q.x, y: q.y, id, radiusX: 8, radiusY: 8, force: 1 })) });
+  await T1('touchStart', [[1, gasPt]]);
+  await sleep(250);
+  const held = await ev(mp, () => RR.Input.getControls().throttle);
+  await T1('touchStart', [[1, gasPt], [2, pausePt]]);
+  await sleep(80);
+  await T1('touchEnd', [[2, pausePt]]);                // the pause finger lifts (GAS still held)
+  await sleep(300);
+  const after = await ev(mp, () => ({ state: RR.Game.state, thr: RR.Input.getControls().throttle }));
+  await T1('touchEnd', []);
+  ok(held > 0.5 && after.state === 'paused' && after.thr === 0, 'second-finger tap on ❚❚ while GAS is held pauses and releases the gas (' + JSON.stringify(after) + ')');
+  await closePage(m);
+}
+
 // ================================================================== main
 async function suite(browser, url, T) {
   console.log('\n=== ' + T + ': ' + url + ' ===');
-  const scenarios = [scenarioMenuAndScreens, scenarioDriving, scenarioMeta, scenarioMobile, scenarioRobustness, scenarioRules, scenarioShell];
+  const scenarios = [scenarioMenuAndScreens, scenarioDriving, scenarioMeta, scenarioMobile, scenarioRobustness, scenarioRules, scenarioShell, scenarioQa2]
+    .filter((sc) => !PICK || PICK.split(',').some((n) => sc.name.toLowerCase().indexOf(n.toLowerCase()) >= 0));
   for (const sc of scenarios) {
     try { await sc(browser, url, T); } catch (e) { ok(false, T + ' ' + sc.name + ' threw: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e)); }
   }

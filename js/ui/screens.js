@@ -115,7 +115,34 @@
     stuck: 'Stuck upside down', lava: 'Melted in lava', rock: 'Flattened by a rock', rocks: 'Flattened by a rock',
     meteor: 'Hit by a meteor', drone: 'Zapped by a drone', lightning: 'Struck by lightning', ceiling: 'Hit the ceiling'
   };
-  const crashText = (r) => (r ? CRASH_TEXT[r] || String(r).replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase()) : 'Wipe out');
+  // One coaching line under a crash reason for new players (first 10 runs) — qa2-12.
+  function coachLine(s) {
+    let runs = 0;
+    try { runs = num(S().stats.runs, 0); } catch (e) { runs = 0; }
+    if (runs > 10) return '';
+    const touch = isTouchUi();
+    const rel = num(s.crashRel, 0);
+    switch (s.crashReason) {
+      case 'head': case 'headHit': case 'head_hit':
+        return rel < 0
+          ? (touch ? 'Nose-dived — hold ↺ TILT to lift the nose before landing' : 'Nose-dived — hold W / ↺ to lift the nose before landing')
+          : (touch ? 'Over-rotated — ease off the gas / tap ↻ TILT in the air' : 'Over-rotated — ease off the gas / tap S in the air');
+      case 'rock': case 'rocks':
+        return 'Falling rocks: slow down and let them land first';
+      case 'flipped':
+        return s.crashPose === 'tail' ? (touch ? 'Ease off GAS on the ground' : 'Ease off W on the ground') : '';
+      case 'lava':
+        return 'Build speed before lava pools';
+      default:
+        return '';
+    }
+  }
+
+  // pose-aware caption shared with the HUD stamp (qa2-11); own map as the fallback
+  const crashText = (r, pose) => {
+    if (r && RR.HUD && typeof RR.HUD.crashText === 'function') return RR.HUD.crashText(r, pose);
+    return r ? CRASH_TEXT[r] || String(r).replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase()) : 'Wipe out';
+  };
 
   // ---------------------------------------------------------------- module state
   const SCREEN_DEFS = [];
@@ -546,7 +573,7 @@
             '<div class="upg-main">' +
               '<div class="upg-head"><b>' + esc(c.name) + '</b><span class="upg-lv" data-ref="lv_' + c.id + '">LV 1</span></div>' +
               '<div class="pips" data-ref="pips_' + c.id + '">' + pips + '</div>' +
-              '<div class="upg-stat"><span class="upg-cur" data-ref="cur_' + c.id + '"></span><span class="upg-arrow">' + icon('chev-right') + '</span><span class="upg-next" data-ref="next_' + c.id + '"></span></div>' +
+              '<div class="upg-stat"><span class="upg-eff" data-ref="eff_' + c.id + '"></span><span class="upg-cur" data-ref="cur_' + c.id + '"></span><span class="upg-arrow">' + icon('chev-right') + '</span><span class="upg-next" data-ref="next_' + c.id + '"></span></div>' +
               '<small class="upg-detail" data-ref="det_' + c.id + '"></small>' +
             '</div>' +
             '<button type="button" class="btn btn-upg" data-act="upgrade" data-arg="' + c.id + '" data-ref="btn_' + c.id + '">' +
@@ -601,7 +628,11 @@
       const d = S();
       this.from = params.from || null;
       this.vid = params.vehicleId && d.unlockedVehicles.indexOf(params.vehicleId) >= 0 ? params.vehicleId : d.selectedVehicle;
-      if (this.vid !== d.selectedVehicle) RR.Progression.selectVehicle(this.vid);
+      // keep the selection (START RUN uses it) and rebuild the menu's attract car with it (qa2-9)
+      if (this.vid !== d.selectedVehicle) {
+        RR.Progression.selectVehicle(this.vid);
+        if (game && game.refreshAttract) game.refreshAttract();
+      }
       this.refresh();
     },
     // What START / RIDE AGAIN launches: the last run's world (and today's challenge for a daily) when
@@ -637,17 +668,20 @@
             pips[i].animate([{ transform: 'scale(.3)', filter: 'brightness(3)' }, { transform: 'scale(1.5)', offset: 0.5 }, { transform: 'scale(1)', filter: 'brightness(1)' }], { duration: 480, easing: 'ease-out' });
           }
         }
+        // main line: player-facing effect "label  current › next"; small line: the technical value (qa2-14)
         const cur = RR.Vehicles.describeUpgrade(vid, c.id, lv, ups);
-        r['cur_' + c.id].textContent = cur.value;
+        const hasEff = !!cur.effectLabel;
+        r['eff_' + c.id].textContent = hasEff ? cur.effectLabel : '';
+        r['cur_' + c.id].textContent = hasEff ? cur.effectValue : cur.value;
         const row = r['btn_' + c.id].parentNode;
         row.classList.toggle('maxed', cu.reason === 'max');
         if (cu.reason === 'max') {
           r['next_' + c.id].textContent = 'MAX';
-          r['det_' + c.id].textContent = cur.detail || '';
+          r['det_' + c.id].textContent = hasEff ? cur.value : cur.detail || '';
         } else {
           const nx = RR.Vehicles.describeUpgrade(vid, c.id, lv + 1, ups);
-          r['next_' + c.id].textContent = nx.value;
-          r['det_' + c.id].textContent = nx.detail || '';
+          r['next_' + c.id].textContent = hasEff ? nx.effectValue : nx.value;
+          r['det_' + c.id].textContent = hasEff ? cur.value + '  →  ' + nx.value : nx.detail || '';
         }
         const btn = r['btn_' + c.id];
         const label = r['lbl_' + c.id];
@@ -1101,6 +1135,7 @@
           '<div class="res-head">' +
             '<div class="res-title" data-ref="title">RUN COMPLETE</div>' +
             '<div class="res-reason" data-ref="reason"></div>' +
+            '<p class="res-coach" data-ref="coach" hidden></p>' +
             '<div class="res-record" data-ref="record">' + icon('trophy') + '<span>NEW RECORD!</span></div>' +
             '<div class="res-first" data-ref="first" hidden></div>' +
           '</div>' +
@@ -1147,8 +1182,11 @@
       this.animDone = false;
       tweens.length = 0;
       // header
-      const reason = s.endReason === 'fuel' ? 'Out of fuel' : s.endReason === 'quit' ? 'Run ended' : 'Crashed — ' + crashText(s.crashReason);
+      const reason = s.endReason === 'fuel' ? 'Out of fuel' : s.endReason === 'quit' ? 'Run ended' : 'Crashed — ' + crashText(s.crashReason, s.crashPose);
       r.reason.textContent = reason;
+      const coach = s.endReason === 'crash' ? coachLine(s) : '';
+      r.coach.textContent = coach;
+      r.coach.hidden = !coach;
       r.title.textContent = s.mode === 'daily' ? 'DAILY RUN COMPLETE' : 'RUN COMPLETE';
       const isDaily = s.mode === 'daily';
       const dist = Math.floor(num(s.distance, 0));
@@ -1201,10 +1239,11 @@
         const n = Math.floor(num(k === 'perfect' && !tr.perfect ? s.perfectLandings : tr[k], 0));
         if (n > 0) th += '<span class="trick-chip">' + icon(ic) + '<span>' + label + '</span><b>×' + n + '</b></span>';
       }
-      if (num(s.maxCombo, 0) >= 2) th += '<span class="trick-chip combo">' + icon('boost') + '<span>Best combo</span><b>×' + Math.floor(s.maxCombo) + '</b></span>';
-      r.tricks.innerHTML = th || '<p class="empty">' + (isTouchUi()
+      // the combo chip is separate: a ×2 coin combo alone must not hide the "no tricks" tip (qa2-12)
+      const comboChip = num(s.maxCombo, 0) >= 2 ? '<span class="trick-chip combo">' + icon('boost') + '<span>Best combo</span><b>×' + Math.floor(s.maxCombo) + '</b></span>' : '';
+      r.tricks.innerHTML = (th || '<p class="empty">' + (isTouchUi()
         ? 'No tricks this time — hold the ↺ TILT button with GAS in the air to backflip!'
-        : 'No tricks this time — lean back (W / ↺) with the gas held in the air to backflip!') + '</p>';
+        : 'No tricks this time — lean back (W / ↺) with the gas held in the air to backflip!') + '</p>') + comboChip;
       // daily
       if (isDaily || dr) {
         r.daily.hidden = false;

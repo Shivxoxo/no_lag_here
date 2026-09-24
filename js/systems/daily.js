@@ -81,7 +81,7 @@
     },
     {
       id: 'storm_winds', name: 'Gale Force', icon: '🌪', difficulty: 2, baseTarget: 1000,
-      description: 'Howling crosswinds shove you around. Lean into the gusts.',
+      description: 'Howling head- and tailwinds. Ride the tailwinds, save fuel in the headwinds.',
       exclude: ['moon_base'],
       // Aim for ≈ 11 m/s² peak gusts whatever the world's own wind is.
       build: (w) => {

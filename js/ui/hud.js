@@ -25,6 +25,12 @@
  *  - The FPS counter follows RR.Save.data.settings.showFps (read each frame, no extra API); it also shows
  *    the renderer's dynamic render scale when below 100% (and the rendered quality in 'auto' mode).
  *  - visible (getter).
+ *  - warning(text, kind, sub?) — optional smaller sub-line under the warning text.
+ *  - Daily runs show the challenge's modifier labels (run.daily.modifiers.labels) as a chip under GOAL.
+ *  - crashText(reason, pose?) — crash caption; 'flipped' with pose 'tail' / 'nose' → 'Stood on its tail too
+ *    long' / 'Stuck on its nose' (the stamp reads run.crashPose; results use the same helper).
+ *  - The pause button pauses on touch/pen pointerup (works while another finger holds a pedal) and on
+ *    click for mouse / keyboard (a click right after a handled tap is ignored).
  */
 (function () {
   'use strict';
@@ -139,6 +145,7 @@
           '<div class="hud-dist-row"><span class="hud-dist-val" data-h="dist">0</span><span class="hud-unit">m</span></div>' +
           '<div class="hud-best-row">' + icon('flag') + '<span class="hud-best-label" data-h="bestLabel">BEST</span><span data-h="best">—</span></div>' +
           '<div class="hud-best-track"><i data-h="bestFill"></i></div>' +
+          '<div class="hud-mods" data-h="mods"></div>' +
         '</div>' +
         '<div class="hud-mid">' +
           '<div class="hud-panel hud-fuel" data-h="fuel">' +
@@ -155,7 +162,7 @@
             '<div class="hud-boss-name">' + icon('mountain') + '<span data-h="bossName">BOSS RUN</span><b data-h="bossPct">0%</b></div>' +
             '<div class="hud-boss-track"><i data-h="bossFill"></i><span class="hud-boss-flag">' + icon('flag') + '</span></div>' +
           '</div>' +
-          '<div class="hud-warning" data-h="warning">' + icon('warning') + '<span data-h="warningText"></span></div>' +
+          '<div class="hud-warning" data-h="warning">' + icon('warning') + '<span class="hud-warning-txt"><span data-h="warningText"></span><small data-h="warningSub"></small></span></div>' +
         '</div>' +
         '<div class="hud-right">' +
           '<div class="hud-panel hud-coins" data-h="coinsPanel">' + icon('coin', 'hud-coin-ic') + '<span data-h="coins">0</span></div>' +
@@ -189,11 +196,39 @@
       });
     }
     if (E.pause) {
-      E.pause.addEventListener('click', (e) => {
-        e.preventDefault();
+      // Touch / pen: pause on pointerup. A second-finger tap while another finger holds a pedal gets
+      // pointerdown/up but no click (the touch-controls sequence is preventDefault'ed) — qa2-5. The click
+      // listener stays for mouse and keyboard, ignoring the click that follows a handled tap.
+      let lastPauseTap = -1e9;
+      const doPause = () => {
         if (RR.Audio) RR.Audio.play('click');
         if (RR.Game && typeof RR.Game.pause === 'function') RR.Game.pause();
+      };
+      const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+      E.pause.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse') return;
+        e.preventDefault();
+        e.stopPropagation();
       });
+      E.pause.addEventListener('pointerup', (e) => {
+        if (e.pointerType === 'mouse') return;
+        e.preventDefault();
+        e.stopPropagation();
+        lastPauseTap = now();
+        doPause();
+      });
+      E.pause.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (now() - lastPauseTap < 400) return;
+        doPause();
+      });
+      // the compatibility click of a handled tap may land on the pause screen that just opened under the
+      // finger: swallow it (same-node capture listeners such as the audio-unlock gesture still run)
+      if (typeof window !== 'undefined' && window.addEventListener) {
+        window.addEventListener('click', (e) => {
+          if (now() - lastPauseTap < 400 && !E.pause.contains(e.target)) { e.preventDefault(); e.stopPropagation(); }
+        }, true);
+      }
     }
     return true;
   }
@@ -237,6 +272,14 @@
     E.stamp.classList.remove('on', 'nofuel');
     E.combo.classList.remove('on');
     E.boss.classList.remove('on');
+    // daily modifiers ('Grip 55%', 'Wind ×2.5', …) as a small chip under GOAL — qa2-13
+    if (E.mods) {
+      const d = run && run.mode === 'daily' && run.daily ? run.daily : null;
+      const labels = d && d.modifiers && Array.isArray(d.modifiers.labels) ? d.modifiers.labels
+        : d && Array.isArray(d.labels) ? d.labels : [];
+      E.mods.textContent = labels.slice(0, 3).join(' · ');
+      E.mods.classList.toggle('on', labels.length > 0);
+    }
     E.distPanel.classList.remove('record');
     E.fuel.classList.remove('low', 'critical', 'refuel');
     E.coins.textContent = '0';
@@ -479,9 +522,12 @@
     }
   }
 
-  function crashText(reason) {
+  // Crash caption; a 'flipped' crash is captioned by its pose (qa2-11: a tail stand is not "on the roof").
+  const POSE_TEXT = { tail: 'Stood on its tail too long', nose: 'Stuck on its nose' };
+  function crashText(reason, pose) {
     if (!reason) return 'Wipe out!';
     const key = String(reason);
+    if ((key === 'flipped' || key === 'flip') && POSE_TEXT[pose]) return POSE_TEXT[pose];
     if (CRASH_TEXT[key]) return CRASH_TEXT[key];
     return key.replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
   }
@@ -491,7 +537,7 @@
     if (last.state === st) return;
     last.state = st;
     if (st === 'crashed') {
-      stamp('CRASHED!', crashText(run.crashReason), false);   // (Run fires the crash flash itself)
+      stamp('CRASHED!', crashText(run.crashReason, run.crashPose), false);   // (Run fires the crash flash itself)
     } else if (st === 'nofuel') {
       stamp('OUT OF FUEL', noFuelSub || 'Coast as far as you can!', true);
     } else if (st === 'running') {
@@ -618,12 +664,14 @@
     bannerT = b.kind === 'boss' ? BANNER_LIFE + 0.6 : BANNER_LIFE;
   }
 
-  function warning(text, kind) {
+  // Optional sub-line (e.g. falling rocks: "Don't rush in — let them land").
+  function warning(text, kind, sub) {
     if (!initialized) return;
-    E.warning.className = 'hud-warning on kind-' + (kind || 'hazard');
+    E.warning.className = 'hud-warning on kind-' + (kind || 'hazard') + (sub ? ' has-sub' : '');
     const ic = E.warning.querySelector('use');
     if (ic) ic.setAttribute('href', '#i-' + (WARNING_ICONS[kind] || 'warning'));
     E.warningText.textContent = String(text || '');
+    if (E.warningSub) E.warningSub.textContent = sub ? String(sub) : '';
     warnT = WARNING_LIFE;
     if (!reducedMotion) {
       animate(E.warning, [{ transform: 'scale(.7)', opacity: 0 }, { transform: 'scale(1.08)', opacity: 1, offset: 0.6 }, { transform: 'scale(1)', opacity: 1 }], { duration: 280, easing: 'ease-out' });
@@ -663,6 +711,6 @@
     return el;
   }
 
-  RR.HUD = { init, show, reset, update, popTrick, banner, toast, warning, flash };
+  RR.HUD = { init, show, reset, update, popTrick, banner, toast, warning, flash, crashText };
   Object.defineProperty(RR.HUD, 'visible', { get: () => visible, enumerable: true });
 })();

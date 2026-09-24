@@ -593,11 +593,15 @@ H.test('decorations: world types, ~1 per 6–12 m, only on moderately flat, non-
       H.assert(Math.abs(slopeK(rec, k)) <= 0.45 && Math.abs(slopeK(rec, k + 1)) <= 0.45, rec.worldId + '/' + rec.seed + ' deco on steep ground at ' + d.x + ' slopes ' + slopeK(rec, k) + ', ' + slopeK(rec, k + 1));
       const k0 = Math.floor(d.x / DX) - I0, fr = d.x / DX - Math.floor(d.x / DX);
       H.assertClose(d.y, rec.hs[k0] + (rec.hs[k0 + 1] - rec.hs[k0]) * fr, 1e-9, 'deco sits on the ground');
-      if (d.layer === 'front') { front++; H.assert(d.scale <= 0.76, 'front decorations are small'); }
+      if (d.layer === 'front') {
+        front++;
+        H.assert(d.scale <= 0.76, 'front decorations are small');
+        H.assert(['crystal', 'alien_plant', 'ice_crystal', 'cairn'].indexOf(d.type) < 0, 'tall ' + d.type + ' never in the front layer (qa2-10)');
+      }
     }
     const spacing = rec.dist / rec.decos.length;
     H.assert(spacing >= 5 && spacing <= 16, rec.worldId + ' deco spacing ' + fmt(spacing));
-    const hasSmall = w.decorations.some((d) => ['rock', 'bush', 'flowers', 'tumbleweed', 'snow_mound', 'crystal', 'alien_plant', 'bones', 'lava_rock', 'ice_crystal', 'cairn'].indexOf(d) >= 0);
+    const hasSmall = w.decorations.some((d) => ['rock', 'bush', 'flowers', 'tumbleweed', 'snow_mound', 'bones', 'lava_rock'].indexOf(d) >= 0);
     H.assert((front > 0 || !hasSmall) && front < rec.decos.length * 0.2, rec.worldId + ' front layer rare (' + front + ')');
   }
 });
