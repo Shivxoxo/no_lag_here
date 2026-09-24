@@ -53,8 +53,10 @@
  *    (1 → 0.85 → 0.7, and on hi-DPI screens → 0.6 → 0.5 but never below 1 backing px per CSS px, and never
  *    below 0.7 effective backing px per CSS px — fixed LOW does not step), EMA < 1.08·v for 6 s probes one
  *    step back up (the wait doubles, ≤ 60 s, when an upgrade is undone within 8 s). A step down is judged
- *    after 3 s at the new step: no improvement (≥ 92 %) with the EMA within 10 % of a refresh period means a
- *    capped display (30/40/50 Hz): the step is undone and v = that period — 30/50 Hz panels stay sharp.
+ *    after 3 s at the new step: no improvement (≥ 92 %) with the EMA within 10 % of a refresh period keeps
+ *    walking down (vsync quantisation: 20–30 ms of work at 60 Hz reads a steady 33.3 ms until a step gets it
+ *    under one period); if even the floor bought nothing the display is capped (30/40/50 Hz): the walk is
+ *    undone and v = that period — 30/50 Hz panels stay sharp.
  *    Gaps > 0.25 s are ignored. Step changes resize the canvas right before the next draw (drawRun /
  *    r.flushResize()), never after a drawn frame (that presented a black frame). r.nudgeUp() retries one
  *    step higher (the Game calls it at every run start).
@@ -104,6 +106,7 @@
   const RING_N = 60;                        // monitored intervals per display-period estimate
   const SLOW_HOLD = 2, FAST_HOLD = 6;       // seconds past a threshold before a step (FAST_HOLD = first probe-up wait)
   const CAP_MEASURE = 3;                    // seconds measured at a new (lower) step before judging it
+  const CAP_WALK_MEASURE = 1.5;             // … per further step of a walk (quantised periods are stable)
   const CAP_HOLD = 20;                      // s a detected refresh cap blocks lower ring estimates (doubles, ≤ 120)
   // nearest period of `list` (Hz) to dt when within tol (relative), else 0
   function snapPeriod(dt, list, tol) {
@@ -840,7 +843,7 @@
       this._vsync = Infinity; this._vsyncDpr = rawDpr();
       this._capHoldUntil = -1; this._capHold = CAP_HOLD;
       // pending judgement of the last step down (vsync-cap detection)
-      this._downPending = false; this._emaBefore = 0; this._downMeasT = 0; this._lastDownHelped = false;
+      this._downPending = false; this._emaBefore = 0; this._downMeasT = 0; this._lastDownHelped = false; this._walkFrom = 0;
       this._pendingResize = false;       // step changes resize before the next draw, never after one (qa2-3)
       this._moonW = 0;
       this.time = 0;
@@ -998,8 +1001,8 @@
     // frame interval; > max(1.2·v, v + 3 ms) for 2 s steps the render scale down, < 1.08·v for _upWait
     // (6 s, doubling ≤ 60 s when an upgrade is undone within 8 s) probes one step back up. After a step
     // down, 3 s are measured at the new step before the next one: if the EMA did not improve (≥ 92 %) and
-    // sits within 10 % of a refresh period, the display is capped there (30 / 40 / 50 Hz…) — the step is
-    // undone and v = that period. suggestedQuality only when the floor is slow although the last step
+    // sits within 10 % of a refresh period, the walk continues down; a floor that still bought nothing means
+    // the display is capped there (30 / 40 / 50 Hz…) — the walk is undone and v = that period. suggestedQuality only when the floor is slow although the last step
     // down measurably helped. Gaps > 0.25 s (pause, hidden tab, on-demand frames) are ignored.
     _monitor(dt) {
       if (!this.autoQuality) return;
@@ -1018,17 +1021,28 @@
       const slowThr = Math.max(1.2 * v, v + 0.003), fastThr = 1.08 * v;
       if (this._downPending) {
         this._downMeasT += dt;
-        if (this._downMeasT >= CAP_MEASURE) {
+        if (this._downMeasT >= (this._autoStep - this._walkFrom > 1 ? CAP_WALK_MEASURE : CAP_MEASURE)) {
           this._downPending = false;
           const helped = this._ftEma < 0.92 * this._emaBefore;
           const cap = helped ? 0 : snapPeriod(this._ftEma, CAP_HZ, 0.1);
           this._lastDownHelped = helped;
           if (cap && this._autoStep > 0) {
-            // the display (or the browser) is capped at this rate: the lower step bought nothing
+            if (this._autoStep < nSteps - 1) {
+              // vsync quantisation: a 60 Hz device doing 20–30 ms of work per frame reads a steady 33.3 ms,
+              // exactly like a 30 Hz cap, until a step gets the work under one period. Keep walking down
+              // while nothing changes (judged against the EMA before the walk); only a floor that bought
+              // nothing proves a cap.
+              this._autoStep++;
+              this._slowT = 0; this._fastT = 0;
+              this._changeStep();
+              this._downPending = true; this._downMeasT = 0;
+              return;
+            }
+            // the display (or the browser) is capped at this rate: the whole walk bought nothing → undo it
             this._vsync = cap;
             this._capHoldUntil = this._monClock + this._capHold;
             this._capHold = Math.min(120, this._capHold * 2);
-            this._autoStep--;
+            this._autoStep = Math.min(this._autoStep - 1, this._walkFrom);
             this._slowT = 0; this._fastT = 0; this._floorT = 0;
             this._changeStep();
             return;
@@ -1042,6 +1056,7 @@
           if (this._autoStep < nSteps - 1) {
             if (this._monClock - this._lastUpAt < 8) this._upWait = Math.min(60, this._upWait * 2);
             this._emaBefore = this._ftEma;
+            this._walkFrom = this._autoStep;
             this._autoStep++;
             this._changeStep();
             this._downPending = true; this._downMeasT = 0;

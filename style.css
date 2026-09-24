@@ -1422,7 +1422,10 @@ body.touch-device .btn kbd { display: none; }
   .hud-coins { font-size: 1.3rem; padding: 0.3rem 0.7rem 0.3rem 0.35rem; }
   .hud-pause { width: 44px; height: 44px; }
   .hud-powerups { top: calc(max(0.4rem, var(--safe-t)) + 4.2rem); }
-  .hud-combo { top: calc(max(0.4rem, var(--safe-t)) + 3.9rem); width: 4.2rem; height: 4.2rem; }
+  .hud-combo { top: calc(max(0.4rem, var(--safe-t)) + 4.4rem); width: 4.2rem; height: 4.2rem; }
+  /* the 9 px text floor (qa2-6) widens the coin-bonus chip: right-align it so it stays on screen */
+  .hud-combo-txt em { left: auto; right: 0; transform: none; }
+  .hud-combo-txt small { letter-spacing: 0.02em; }
   .hud-combo-txt b { font-size: 1.3rem; }
   .hud-banner { top: 30%; }
   .hud-banner-title { font-size: clamp(1.6rem, 5.5vw, 2.6rem); }

@@ -649,6 +649,25 @@ H.test('Renderer: a step down that measurably helped is kept (qa2-1 d)', () => {
   H.assert(r.frameStats().step >= 1, 'the step is kept (step ' + r.frameStats().step + ')');
 });
 
+H.test('Renderer: vsync-quantised slow frames (33.3 ms at 60 Hz) keep stepping down until one helps; a true cap is undone (verifier)', () => {
+  // a 60 Hz device whose work is 4 + 22·s² ms: 1 → 26 ms and 0.85 → 20 ms both present at 33.3 ms (looks like a
+  // 30 Hz cap), 0.7 → 14.8 ms presents at 16.7 ms — the walk must reach it instead of undoing the first step
+  const quant = (w) => Math.max(1, Math.ceil(w / 16.667 - 1e-9)) * 16.667;
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  feedFrames(r, 16.67, 5);
+  feedFrames(r, (rr) => quant(4 + 22 * rr.renderScale * rr.renderScale), 30);
+  H.assert(r.frameStats().step === 2 && r.renderScale === 0.7, 'walked down to the step that reaches 60 fps (step ' + r.frameStats().step + ')');
+  H.assertClose(r.frameStats().vsync, 16.67, 0.05, 'still a 60 Hz display');
+  // a cap no step can beat: the whole walk is undone
+  const b = stubCanvas(1000, 600);
+  const r2 = new RR.Renderer(b.el);
+  feedFrames(r2, 16.67, 5);
+  feedFrames(r2, 33.3, 30);
+  H.assert(r2.frameStats().step === 0 && r2.suggestedQuality === null, 'cap: back at step 0 (step ' + r2.frameStats().step + ')');
+});
+
 H.test("Renderer: AUTO never renders below LOW's 0.75; fixed LOW does not step on DPR 1 (qa2-1 e)", () => {
   for (const dpr of [1, 2, 3]) {
     const { el } = stubCanvas(960, 540);

@@ -224,7 +224,9 @@ Fresh-eyes QA round → fixes. Each file header documents its part; behaviour / 
   EMA < 1.08·v for `_upWait` (6 s, doubling ≤ 60 s when an upgrade is undone within 8 s). A vsync-locked 60 Hz
   display (16.7 ms) now steps back up; 50 Hz / 30 Hz panels are not "slow".
 - A step down is judged after 3 s at the new step (the next step down waits for it): EMA ≥ 92 % of the EMA before
-  and within 10 % of a refresh period (incl. 40 Hz) → the display is capped: the step is undone and v = that
+  and within 10 % of a refresh period (incl. 40 Hz) → keep walking down (verifier: vsync quantisation — a 60 Hz
+  device doing 20–30 ms of work reads a steady 33.3 ms, exactly like a 30 Hz cap, until a step gets the work under
+  one period); only when even the floor bought nothing is the display capped: the whole walk is undone and v = that
   period (a cap blocks lower ring estimates for 20 s, doubling ≤ 120 s). `suggestedQuality` only when the floor is
   slow although the last step down measurably helped.
 - AUTO ladder: high 1 → 0.85 → 0.75 → medium 0.85 → low (never below LOW's 0.75). Fixed quality: never below 0.7
@@ -287,3 +289,15 @@ Fresh-eyes QA round → fixes. Each file header documents its part; behaviour / 
 `recordAttempt` signature, AUTO quality, paints by level, first section at 1.2–1.8 km, R any time). `npm run smoke`
 uses `$NODE_PATH` or `npm root -g`; `SMOKE_SCENARIO=qa2` runs a single smoke scenario.
 
+
+**Independent verification of the second QA pass** (all 16 items re-measured)
+- Dynamic resolution: a step down that bought nothing while sitting on a refresh period no longer ends the
+  search at once. A 60 Hz device doing 20–30 ms of work per frame presents a steady 33.3 ms (vsync quantisation),
+  which looks exactly like a 30 Hz cap until a step gets the work under one period. The ladder keeps walking
+  down (1.5 s per further step) and undoes the whole walk only when even the floor bought nothing. Before this,
+  such a device stayed at 30 fps and full resolution for the rest of the session. New visuals test.
+- Results coaching for a tail stand on touch UIs now says "Ease off ↺ TILT on the ground". It used to say GAS,
+  but the tilt button is the touch control that is W on a keyboard.
+- Landscape phones: the 9 px text floor widened the combo "+N% COINS" chip past the right screen edge, and the
+  ring overlapped the 44 px pause button. The chip is now right-aligned under the ring and the ring sits 0.5 rem
+  lower.

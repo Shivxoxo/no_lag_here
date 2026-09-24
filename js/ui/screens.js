@@ -130,7 +130,7 @@
       case 'rock': case 'rocks':
         return 'Falling rocks: slow down and let them land first';
       case 'flipped':
-        return s.crashPose === 'tail' ? (touch ? 'Ease off GAS on the ground' : 'Ease off W on the ground') : '';
+        return s.crashPose === 'tail' ? (touch ? 'Ease off ↺ TILT on the ground' : 'Ease off W on the ground') : '';
       case 'lava':
         return 'Build speed before lava pools';
       default:
