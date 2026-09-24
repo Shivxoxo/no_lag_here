@@ -1,0 +1,12 @@
+{
+  "name": "ridge-rush",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RIDGE RUSH — Master the Mountains. An original 2D physics hill-climbing browser game (vanilla JS + Canvas).",
+  "scripts": {
+    "test": "node tests/run-all.js",
+    "smoke": "NODE_PATH=/opt/node22/lib/node_modules node tests/smoke.js",
+    "serve": "npx http-server -c-1 -p 8080 ."
+  },
+  "license": "MIT"
+}
