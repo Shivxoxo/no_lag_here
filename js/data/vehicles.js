@@ -17,6 +17,12 @@
  *    (1 ⇒ ≈ 0.9 g of forward thrust along the chassis).
  *  - describeUpgrade() also returns {detail, amount}; displayStats() values are floats in 0..10.
  *  - RR.Vehicles.CAT_MULT and RR.Vehicles.indexOf(id) are exported for convenience.
+ *  - (integration balance pass) Fuel: an engine that is running burns `idleBurn` all the time (also in
+ *    the air) plus `burnRate × |throttle|`. Measured with a competent driver the cars travel ~20 m/s and
+ *    sit in the air ~40 % of the time, so the original 45–60 s full-throttle tank lasted 1.6–3 km and fuel
+ *    never mattered. The rates are set so a stock tank covers ≈ 450–650 m of typical driving
+ *    (≈ 17–25 s at full throttle); FUEL upgrades extend it up to ≈ 2.4×.
+ *  - (integration economy pass) upgradeBaseCost values are 1.5× the original design (formula unchanged).
  */
 (function () {
   'use strict';
@@ -88,7 +94,7 @@
       description: 'A tube-frame buggy with forgiving suspension and a willing little engine. ' +
         'Balanced in every way — the perfect machine to learn the mountains with.',
       unlock: { level: 1, coins: 0, tokens: 0 },
-      upgradeBaseCost: 120,
+      upgradeBaseCost: 180,
       style: 'buggy',
       colors: { body: '#f2a007', accent: '#e8412c', trim: '#2b2f36', wheel: '#1d1f24', rim: '#d9dde3' },
       special: null,
@@ -103,7 +109,7 @@
         torque: 920, topSpeed: 22, reverseTorque: 560, reverseSpeed: 7, brakeTorque: 1600,
         grip: 0.9, surfaceAdapt: 0.25, rollingResistance: 0.03, drag: 0.0016,
         airAccel: 9.0, groundLean: 0.45, airDamping: 1.1,
-        fuel: { capacity: 100, burnRate: 1.8, idleBurn: 0.25 }
+        fuel: { capacity: 100, burnRate: 3.4, idleBurn: 1.5 }
       }
     },
     {
@@ -113,7 +119,7 @@
       description: 'A featherweight desert racer with a screaming engine and a short wheelbase. ' +
         'Explosive off the line and flips on a whim — pure air-time joy if you can tame it.',
       unlock: { level: 2, coins: 2500, tokens: 1 },
-      upgradeBaseCost: 150,
+      upgradeBaseCost: 225,
       style: 'dirt',
       colors: { body: '#2fbf71', accent: '#f5f5f5', trim: '#1b2a24', wheel: '#1b1c20', rim: '#ffcc33' },
       special: null,
@@ -128,7 +134,7 @@
         torque: 640, topSpeed: 23.5, reverseTorque: 380, reverseSpeed: 7, brakeTorque: 950,
         grip: 0.92, surfaceAdapt: 0.35, rollingResistance: 0.028, drag: 0.0014,
         airAccel: 13.0, groundLean: 0.45, airDamping: 1.4,
-        fuel: { capacity: 80, burnRate: 1.35, idleBurn: 0.2 }
+        fuel: { capacity: 80, burnRate: 3.05, idleBurn: 1.35 }
       }
     },
     {
@@ -138,7 +144,7 @@
       description: 'A lifted pickup with a massive torque figure and a planted, heavy stance. ' +
         'Shrugs off rough ground and rarely flips — but it drinks fuel like there is no tomorrow.',
       unlock: { level: 4, coins: 7500, tokens: 2 },
-      upgradeBaseCost: 200,
+      upgradeBaseCost: 300,
       style: 'truck',
       colors: { body: '#3d6fd8', accent: '#e9eef7', trim: '#20242c', wheel: '#17181c', rim: '#aeb6c2' },
       special: null,
@@ -153,7 +159,7 @@
         torque: 2350, topSpeed: 19.5, reverseTorque: 1400, reverseSpeed: 6.5, brakeTorque: 3800,
         grip: 0.9, surfaceAdapt: 0.3, rollingResistance: 0.035, drag: 0.0022,
         airAccel: 6.5, groundLean: 0.45, airDamping: 1.0,
-        fuel: { capacity: 140, burnRate: 2.9, idleBurn: 0.35 }
+        fuel: { capacity: 140, burnRate: 3.9, idleBurn: 1.75 }
       }
     },
     {
@@ -163,7 +169,7 @@
       description: 'A stage-bred rally car with long-travel dampers that swallow jumps whole. ' +
         'Highest top speed on dirt and the smoothest landings in the garage.',
       unlock: { level: 7, coins: 15000, tokens: 3 },
-      upgradeBaseCost: 260,
+      upgradeBaseCost: 390,
       style: 'rally',
       colors: { body: '#e63946', accent: '#ffffff', trim: '#1d3557', wheel: '#15161a', rim: '#f1faee' },
       special: null,
@@ -178,7 +184,7 @@
         torque: 1280, topSpeed: 26, reverseTorque: 760, reverseSpeed: 7.5, brakeTorque: 2000,
         grip: 0.95, surfaceAdapt: 0.35, rollingResistance: 0.025, drag: 0.0012,
         airAccel: 9.5, groundLean: 0.45, airDamping: 1.15,
-        fuel: { capacity: 110, burnRate: 2.0, idleBurn: 0.28 }
+        fuel: { capacity: 110, burnRate: 3.8, idleBurn: 1.7 }
       }
     },
     {
@@ -188,7 +194,7 @@
       description: 'Giant tyres, locked diffs and a mountain of low-down torque. ' +
         'Slow on the flat, unstoppable on the steep — this is the one for the walls nobody else can climb.',
       unlock: { level: 10, coins: 25000, tokens: 4 },
-      upgradeBaseCost: 300,
+      upgradeBaseCost: 450,
       style: 'crawler',
       colors: { body: '#8a9a3b', accent: '#f4d35e', trim: '#2f3325', wheel: '#1a1b17', rim: '#5d6b2e' },
       special: null,
@@ -203,7 +209,7 @@
         torque: 2700, topSpeed: 15, reverseTorque: 1800, reverseSpeed: 6, brakeTorque: 4200,
         grip: 1.2, surfaceAdapt: 0.5, rollingResistance: 0.045, drag: 0.0025,
         airAccel: 6.5, groundLean: 0.45, airDamping: 1.0,
-        fuel: { capacity: 130, burnRate: 2.4, idleBurn: 0.3 }
+        fuel: { capacity: 130, burnRate: 3.5, idleBurn: 1.55 }
       }
     },
     {
@@ -213,7 +219,7 @@
       description: 'An experimental low-drag racer with magnetic dampers and an Ion Thruster for bursts of ' +
         'raw forward thrust. Fast, precise and very, very expensive.',
       unlock: { level: 14, coins: 45000, tokens: 6 },
-      upgradeBaseCost: 420,
+      upgradeBaseCost: 630,
       style: 'storm',
       colors: { body: '#2b2d42', accent: '#3ff3ff', trim: '#8d99ae', wheel: '#111217', rim: '#3ff3ff' },
       // Run applies the thruster by passing controls.boost = special.force for `duration` seconds.
@@ -229,7 +235,7 @@
         torque: 1320, topSpeed: 28.5, reverseTorque: 800, reverseSpeed: 7.5, brakeTorque: 2100,
         grip: 0.95, surfaceAdapt: 0.3, rollingResistance: 0.02, drag: 0.0007,
         airAccel: 10.5, groundLean: 0.45, airDamping: 1.3,
-        fuel: { capacity: 120, burnRate: 2.1, idleBurn: 0.28 }
+        fuel: { capacity: 120, burnRate: 4.05, idleBurn: 1.8 }
       }
     }
   ];
@@ -409,8 +415,8 @@
           amount: t.topSpeed };
       }
       case 'fuel':
-        return { stat: 'Tank', value: Math.round(t.fuel.capacity) + ' L · ' + fmt1(t.fuel.burnRate) + ' L/s',
-          detail: Math.round(t.fuel.capacity / t.fuel.burnRate) + ' s at full throttle', amount: t.fuel.capacity };
+        return { stat: 'Tank', value: Math.round(t.fuel.capacity) + ' L · ' + fmt1(t.fuel.burnRate + t.fuel.idleBurn) + ' L/s',
+          detail: Math.round(t.fuel.capacity / (t.fuel.burnRate + t.fuel.idleBurn)) + ' s at full throttle', amount: t.fuel.capacity };
       case 'grip':
         return { stat: 'Grip', value: 'μ ' + fmt2(t.grip),
           detail: 'Traction for ' + Math.round(Math.atan(t.grip) * 180 / Math.PI) + '° slopes on dry ground', amount: t.grip };
@@ -445,7 +451,7 @@
       grip: bar(0.65 * t.grip + 0.35 * slippery, 0.5, 1.9),
       suspension: bar(0.5 * U.clamp(U.invLerp(0.2, 0.75, travel), 0, 1) + 0.5 * U.clamp(U.invLerp(0.2, 0.85, t.suspension.zeta), 0, 1), 0, 1),
       air: bar(t.airTorque / t.inertiaEff, 4, 24),
-      fuel: bar(t.fuel.capacity / t.fuel.burnRate, 30, 150),
+      fuel: bar(t.fuel.capacity / (t.fuel.burnRate + t.fuel.idleBurn), 8, 64),
       stability: bar(stability, 0, 1)
     };
   }

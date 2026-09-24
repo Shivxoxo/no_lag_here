@@ -41,9 +41,10 @@
     },
     {
       id: 'no_fuel', name: 'Last Drop', icon: '⛽', difficulty: 3, baseTarget: 850,
-      description: 'No fuel pickups anywhere — but your engine sips at 45%. Make every drop count.',
+      description: 'No fuel pickups anywhere — but your engine sips at 35%. Make every drop count.',
       exclude: [],
-      build: () => ({ noFuelPickups: true, fuelEfficiencyMul: 0.45, labels: ['No fuel pickups', 'Fuel use 45%'] })
+      // (integration balance pass: 0.45 → 0.35 to match the retuned, thirstier engines)
+      build: () => ({ noFuelPickups: true, fuelEfficiencyMul: 0.35, labels: ['No fuel pickups', 'Fuel use 35%'] })
     },
     {
       id: 'max_speed', name: 'Redline', icon: '💨', difficulty: 2, baseTarget: 1400,

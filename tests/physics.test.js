@@ -259,7 +259,8 @@ H.test('12c getTuned is monotonic and meaningful per category (level 10 vs 1)', 
 
 H.test('12d upgradeCost follows the contract formula', () => {
   const MULT = { engine: 1.2, suspension: 0.9, tires: 0.8, fuel: 0.85, grip: 0.9, air: 0.7, brakes: 0.6 };
-  const BASE = { trail_buggy: 120, dirt_runner: 150, mountain_truck: 200, rally_beast: 260, rock_crawler: 300, storm_runner: 420 };
+  // (integration economy pass: base costs ×1.5)
+  const BASE = { trail_buggy: 180, dirt_runner: 225, mountain_truck: 300, rally_beast: 390, rock_crawler: 450, storm_runner: 630 };
   for (const id of IDS) {
     H.assert(V.byId(id).upgradeBaseCost === BASE[id], id + ' base cost');
     for (const cat of CATS) {
@@ -274,7 +275,7 @@ H.test('12d upgradeCost follows the contract formula', () => {
     }
   }
   H.assert(V.upgradeCost('nope', 'engine', 1) === Infinity && V.upgradeCost('trail_buggy', 'nope', 1) === Infinity, 'unknown');
-  H.assert(V.upgradeCost('trail_buggy', 'engine', 1) === 140, 'buggy engine 1→2 = 140');
+  H.assert(V.upgradeCost('trail_buggy', 'engine', 1) === 220, 'buggy engine 1→2 = 220');
 });
 
 H.test('12e describeUpgrade and displayStats are readable and increase with upgrades', () => {
@@ -285,7 +286,8 @@ H.test('12e describeUpgrade and displayStats are readable and increase with upgr
   const d0 = V.describeUpgrade('trail_buggy', 'engine', 1);
   H.assert(/^\d{3,}(,\d{3})? Nm$/.test(d0.value) || /^\d{1,3}(,\d{3})+ Nm$/.test(d0.value), 'torque value ' + d0.value);
   H.assert(/^\d+ L · \d+\.\d L\/s$/.test(V.describeUpgrade('trail_buggy', 'fuel', 1).value), 'tank format');
-  H.assert(V.describeUpgrade('trail_buggy', 'fuel', 1).value === '100 L · 1.8 L/s', 'buggy tank ' + V.describeUpgrade('trail_buggy', 'fuel', 1).value);
+  // (integration balance pass: full-throttle consumption = burnRate + idleBurn)
+  H.assert(V.describeUpgrade('trail_buggy', 'fuel', 1).value === '100 L · 4.9 L/s', 'buggy tank ' + V.describeUpgrade('trail_buggy', 'fuel', 1).value);
   H.assert(/^μ \d\.\d\d$/.test(V.describeUpgrade('trail_buggy', 'grip', 1).value), 'grip format');
   H.assert(/km\/h$/.test(V.describeUpgrade('trail_buggy', 'tires', 4).value), 'tires km/h');
   for (const id of IDS) {

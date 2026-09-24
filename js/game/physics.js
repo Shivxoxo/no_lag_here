@@ -74,7 +74,9 @@
   const AIR_RAMP = 0.08;             // s: air control fades in after leaving the ground
   const LEAN_FADE_LO = 0.8;          // m/s: ground lean is zero below this speed (anti self-flip)
   const LEAN_FADE_HI = 4.0;          // m/s: ground lean reaches full strength here
-  const THROTTLE_AIR_LEAN = 0.85;    // gas in the air → backflip torque, brake → frontflip
+  const THROTTLE_AIR_LEAN = 0.5;     // gas in the air → backflip torque, brake → frontflip (integration: was 0.85 —
+                                     // holding gas through a 1.2 s hop spun the car 190° onto its head; W + gas
+                                     // still gives the full air torque for deliberate flips)
   const REVERSE_ENTER = 0.6;         // m/s: below this forward speed, brake input becomes reverse
   const REVERSE_EXIT = 1.6;          // m/s: hysteresis
   const BOOST_ACCEL = 0.9 * CONST.GRAVITY;

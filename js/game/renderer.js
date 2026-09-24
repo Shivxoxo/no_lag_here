@@ -1409,7 +1409,7 @@
       if (!art || typeof art.draw !== 'function') return;
       const o = this._vopts;
       const pu = run.powerUps;
-      o.crashed = run.state === 'crashed';
+      o.crashed = run.state === 'crashed' || (run.state === 'ended' && run.endReason === 'crash');   // keep the pose on the frozen results frame
       o.boost = !!run.boostActive || puActive(pu, 'boost');
       o.shield = puActive(pu, 'shield');
       o.thruster = !!(run.specialActive || run.thrusterActive);
@@ -1584,7 +1584,7 @@
       const fuelMax = U.safeNum(run.fuelMax, 0);
       const frac = fuelMax > 0 ? clamp(U.safeNum(run.fuel, fuelMax) / fuelMax, 0, 1) : 1;
       const lowFuel = frac < 0.2 && (run.state === 'running' || run.state === 'nofuel' || !run.state);
-      const crashed = run.state === 'crashed';
+      const crashed = run.state === 'crashed' || (run.state === 'ended' && run.endReason === 'crash');
       const since = this._clock - this._crashAt;
       if (!slow && !lowFuel && !crashed && since > 0.6) return;
       const V = this._vignettes(ctx);

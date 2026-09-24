@@ -39,6 +39,8 @@
  *    world / modifier multipliers.
  *  - Lava eruptions can also occur inside volcano sections of worlds whose pool lacks 'lava_eruption'.
  *  - In attract mode no warnings/banners/audio are emitted and nothing can damage the vehicle.
+ *  - (integration) A falling rock is fatal only while it is still coming down; once landed it is a
+ *    knock-back obstacle (ramming a rolling boulder at speed no longer ends the run on its own).
  */
 (function () {
   'use strict';
@@ -1209,7 +1211,10 @@
       if (!hit) return;
       const b = this.run.body;
       p.hitDone = true;
-      if (hit === 2) {
+      // Only a rock coming DOWN on the driver is fatal ("flattened"). A rock that has already landed and
+      // is rolling is a (hefty) obstacle: ramming it knocks the car around instead of ending the run —
+      // otherwise every drop zone the player fails to stop before is an unavoidable death.
+      if (hit === 2 && !(p.landed && p.vy > -4)) {
         this._crash(p.id, p.warnedAt, 'rock');
       } else {
         // knock: push from the rock toward the chassis, stronger for big/fast rocks

@@ -74,3 +74,21 @@ wiring rules the implementations added. **Code that wires modules together must 
 ## Audio
 - Call `RR.Audio.init()` only from a user gesture (`RR.Input` `'firstGesture'`). `engineStart/music`
   requested before init are remembered. Engine routes through the SFX bus. `RR.Audio.stats()` for debugging.
+
+## Integration pass (feel / balance / fairness) — changes to the documented numbers
+Measured with a headless bot (hold gas, feather when the nose rises, level in the air) on the real modules;
+see the report for the numbers. All changes are also noted in each file's header.
+- **Fuel** (`vehicles.js`): a running engine burns `idleBurn` all the time plus `burnRate × |throttle|`; rates
+  roughly 2–2.5× the original so a stock tank covers ≈ 450–650 m of typical driving (the old 45–60 s
+  full-throttle tank lasted 1.6–3 km and fuel never mattered). Garage shows full-throttle L/s (burn + idle).
+- **Fuel pickups** (`collectibles.js`): gaps `min(1150, 230 + 0.5·x) × world.fuelSpacing` (±15 %) instead of
+  `lerp(170, 360, difficulty)`; first mega orb ≈ 1.9 km then every 1.9–2.6 km; energy-cell chance 35→15 %.
+  Fuel pickups also collect when the car passes ≤ 3.6 m above them (crest hops no longer skip the only can).
+  `FUEL BOOST` power-up weight 0.8 → 0.5; fuel-zone refill 6 → 4.5 %/s (`run.js`); daily `no_fuel` 45 → 35 %.
+- **Economy**: coin trails 4–10 coins every 34–70 m (was 5–12 every 16–38 m), risky jump arcs bronze with a
+  silver apex + one high gold, rock-garden lines mostly bronze; combo multiplier `min(3, 1 + 0.25·(n−1))`
+  (was ×5 cap); PERFECT LANDING needs ≤ 0.15 rad, both wheels within 0.12 s, ≥ 0.75 s air; vehicle
+  `upgradeBaseCost` × 1.5 (formula unchanged).
+- **Feel**: gas-in-air rotation `THROTTLE_AIR_LEAN` 0.85 → 0.5 (W + gas still gives full air torque for
+  deliberate flips); tail-stand crash rule speed 1 → 2.5 m/s; camera gets the time-scaled velocity in
+  slow-mo; portrait viewports zoom to ≤ 19 m across; a falling rock is fatal only while still falling.

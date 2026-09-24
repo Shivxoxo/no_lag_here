@@ -13,6 +13,8 @@
  *
  * Contract additions: cam.cx / cam.cy = rendered view centre (x + shakeX, y + shakeY), used by
  * worldToScreen / screenToWorld / bounds; cam.baseZoom; cam.reducedMotion (last opts value).
+ * (integration) Portrait viewports (h > 1.1 w) zoom in to show at most ~19 m across and allow 30 %
+ * look-ahead, so the vehicle is not a speck on tall phone screens.
  */
 (function () {
   'use strict';
@@ -23,6 +25,8 @@
 
   const VIEW_METERS_H = 15;      // base zoom shows ~15 m vertically …
   const VIEW_METERS_W = 24;      // … or ~24 m horizontally, whichever is tighter
+  const VIEW_METERS_W_PORTRAIT = 19; // portrait screens: at most ~19 m across (integration: the 24 m rule
+                                     // left a 55 px car in a sea of sky on a 390×844 phone)
   const OMEGA_X = 7.5;           // horizontal follow spring (rad/s)
   const OMEGA_Y = 4.5;           // vertical follow spring — softer to hide suspension bounce
   const VEL_SMOOTH_X = 3.0;      // low-pass on target velocity while it grows (1/s) …
@@ -85,7 +89,10 @@
     setViewport(w, h) {
       this.viewW = isNum(w) && w > 0 ? w : this.viewW;
       this.viewH = isNum(h) && h > 0 ? h : this.viewH;
-      this.baseZoom = Math.max(4, Math.min(this.viewH / VIEW_METERS_H, this.viewW / VIEW_METERS_W));
+      let z = Math.min(this.viewH / VIEW_METERS_H, this.viewW / VIEW_METERS_W);
+      this._portrait = this.viewH > this.viewW * 1.1;
+      if (this._portrait) z = Math.max(z, this.viewW / VIEW_METERS_W_PORTRAIT);
+      this.baseZoom = Math.max(4, z);
       this.zoom = this.baseZoom * this._zoomMul;
     }
 
@@ -138,7 +145,7 @@
         // vertical speed with a soft dead zone: suspension bounce (< ~1 m/s) never moves the view
         const svy = this._svy;
         const vyd = svy > FF_DEADZONE_Y ? svy - FF_DEADZONE_Y : svy < -FF_DEADZONE_Y ? svy + FF_DEADZONE_Y : 0;
-        const lookXt = clamp(this._svx * LOOK_X_PER_MS, -0.1 * viewWm, 0.25 * viewWm);
+        const lookXt = clamp(this._svx * LOOK_X_PER_MS, -0.1 * viewWm, (this._portrait ? 0.3 : 0.25) * viewWm);
         const lookYt = clamp(vyd * LOOK_Y_PER_MS, -0.22 * viewHm, 0.14 * viewHm);
         this._lookX = U.damp(this._lookX, lookXt, LOOK_SMOOTH, dt);
         const ly = this._lookY;
