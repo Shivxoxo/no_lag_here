@@ -1474,6 +1474,44 @@ body.touch-device .btn kbd { display: none; }
   .tut-tips li, .upg-stat, .veh-selected-tag, .res-best small { font-size: max(9px, 0.8rem); }
 }
 
+/* touch screens that are not short landscape (portrait phones, tablets): the same px floors as above —
+   tap targets ≥ 40 px (swatches ≥ 34), text ≥ 9.5 px — independent of the root font size */
+@media (min-height: 521px) {
+  body.touch-device :is(.btn, .btn-sm, .btn-upg, .btn-settings, .seg button, .sel-chip) { min-height: 40px; }
+  body.touch-device .btn-back { min-height: 40px; min-width: 40px; }
+  body.touch-device .seg button { min-width: 44px; }
+  body.touch-device :is(.arrow-btn, .arrow-btn.sm) { width: 40px; height: 40px; }
+  body.touch-device .range-wrap input[type="range"] { min-height: 40px; }
+  body.touch-device .toggle { width: 48px; height: 30px; border-radius: 15px; }
+  body.touch-device .toggle i { top: 3px; left: 3px; width: 24px; height: 24px; }
+  body.touch-device .toggle[aria-checked="true"] i { transform: translateX(18px); }
+  body.touch-device .toggle::after { content: ""; position: absolute; inset: -6px; }   /* 60 × 42 hit area */
+  body.touch-device .swatch { width: max(34px, 1.9rem); height: max(34px, 1.9rem); flex: none; }
+  body.touch-device .swatch:hover { transform: none; }
+  body.touch-device .sw-lock .ic { width: 12px; height: 12px; }
+  body.touch-device .sw-lock small { margin-top: 0; letter-spacing: -0.02em; }
+  body.touch-device :is(.sw-lock small, .hud-combo-txt small, .pause-stats small, .goal-box small, .hud-combo-txt em,
+    .sel-chip small, .veh-cycler small, .wc-text small, .stat-name, .veh-badge-sel, .veh-badge-special, .wc-badge-sel,
+    .hud-meta small) { font-size: 9.5px; }
+  body.touch-device :is(.diff-label, .tchip) { font-size: max(9.5px, 0.66rem); }
+  body.touch-device :is(.hud-fps, .lvl-xp, .mis-next small) { font-size: max(9.5px, 0.68rem); }
+  body.touch-device :is(.daily-date, .hud-best-row, .res-xp-break, .stat-tile small, .upg-detail, .upg-lv) { font-size: max(9.5px, 0.7rem); }
+  body.touch-device :is(.cref-title, .hud-boss-name, .hud-chip, .hud-meta, .mis-main small, .mod-chip, .pause-hint,
+    .res-level-bar small, .set-label small, kbd) { font-size: max(9.5px, 0.72rem); }
+  body.touch-device .controls-ref li { font-size: max(9.5px, 0.74rem); }
+  body.touch-device .btn-tile em { font-size: max(9.5px, 0.72em); }
+  body.touch-device .pm-row small { font-size: max(9.5px, 1em); }   /* mission progress '0/1' in the pause panel */
+  body.touch-device :is(.daily-done, .daily-world em, .garage-tip, .hud-lowfuel, .res-dist small, .ts-text small,
+    .tut-title, .wc-req, .pm-row) { font-size: max(9.5px, 0.76rem); }
+  body.touch-device :is(.badge, .claimed-tag, .mis-bonus-main small, .rchip, .res-side h4, .seg button, .trick-chip,
+    .wc-best, .btn-upg) { font-size: max(9.5px, 0.78rem); }
+  body.touch-device :is(.block-title, .block-title em, .btn-sm, .garage-name p, .hud-stamp-sub, .lvl-cap,
+    .res-best, .set-group h4, .tut-tips li, .upg-stat, .veh-selected-tag, .res-best small) { font-size: max(9.5px, 0.8rem); }
+}
+@media (max-width: 600px) and (min-height: 521px) {
+  body.touch-device .lock-req { font-size: max(9.5px, 0.68rem); }   /* the portrait rule shrinks it to 0.68rem */
+}
+
 
 /* ============================================================== MOTION & QUALITY */
 @media (prefers-reduced-motion: reduce) {
