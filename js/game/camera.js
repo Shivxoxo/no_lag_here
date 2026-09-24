@@ -1,0 +1,226 @@
+/* RIDGE RUSH — follow camera (RR.Camera).
+ *
+ * Smooth, frame-rate independent chase camera:
+ *  - look-ahead in the direction of travel (horizontal ∝ speed, vertical ∝ climb/fall rate),
+ *    computed from a low-passed velocity so suspension bounce never reaches the view;
+ *  - critically damped spring follow (exact closed-form step ⇒ identical feel at 30 or 144 FPS)
+ *    with velocity feed-forward, so there is no speed-dependent lag; the vertical axis is softer than
+ *    the horizontal one to swallow suspension micro-bounce;
+ *  - a containment band so the vehicle can never leave the screen, whatever happens;
+ *  - subtle zoom-out with speed (≤ 18 %) and on big air (≤ 15 %), combined ≤ 25 %;
+ *  - trauma-style shake with smooth noise and quadratic decay (15 % strength when reducedMotion,
+ *    which also halves the zoom effects).
+ *
+ * Contract additions: cam.cx / cam.cy = rendered view centre (x + shakeX, y + shakeY), used by
+ * worldToScreen / screenToWorld / bounds; cam.baseZoom; cam.reducedMotion (last opts value).
+ */
+(function () {
+  'use strict';
+  const RR = (window.RR = window.RR || {});
+  const U = RR.Util;
+  const clamp = U.clamp;
+  const isNum = U.isNum;
+
+  const VIEW_METERS_H = 15;      // base zoom shows ~15 m vertically …
+  const VIEW_METERS_W = 24;      // … or ~24 m horizontally, whichever is tighter
+  const OMEGA_X = 7.5;           // horizontal follow spring (rad/s)
+  const OMEGA_Y = 4.5;           // vertical follow spring — softer to hide suspension bounce
+  const VEL_SMOOTH_X = 3.0;      // low-pass on target velocity while it grows (1/s) …
+  const VEL_SMOOTH_Y = 4.5;
+  const VEL_RELEASE = 14;        // … and while it shrinks: landings/impacts are tracked at once
+  const MAX_REL_VEL = 6;         // m/s: cap on camera-vs-target velocity (sudden stops → short dip)
+  const FF_DEADZONE_Y = 0.8;     // m/s: vertical speeds below this (suspension bounce) are ignored
+  const LOOK_X_PER_MS = 0.3;     // horizontal look-ahead (s of travel)
+  const LOOK_Y_PER_MS = 0.22;    // vertical look-ahead (s of climb/fall)
+  const LOOK_SMOOTH = 1.8;
+  const LOOK_SMOOTH_Y = 2.6;     // vertical look-ahead builds up at this rate …
+  const LOOK_RELEASE_Y = 7;      // … and relaxes quickly (no lingering dip after a landing)
+  const VERTICAL_BIAS = 0.06;    // fraction of view height the vehicle sits below centre
+  const MAX_SPEED_ZOOM = 0.18;
+  const MAX_AIR_ZOOM = 0.15;
+  const MAX_TOTAL_ZOOM = 0.25;
+  const CONTAIN_X = 0.42;        // vehicle kept within ±42 % of the view width from centre
+  const CONTAIN_Y = 0.36;        // … and ±36 % of the view height
+
+  // Exact step of a critically damped spring chasing a target g(τ) that moves linearly at velocity v
+  // during the frame and ends at g1. The spring aims 2v/ω ahead of the target (feed-forward), which
+  // exactly cancels the steady-state lag of a critically damped follower: with y = x − g(τ),
+  //   y'' + 2ω·y' + ω²·y = 0   ⇒   y(τ) = (y0 + (y0' + ω·y0)·τ)·e^(−ωτ).
+  // Closed form ⇒ identical motion at any frame rate, and zero lag at constant speed.
+  function springStep(s, g1, v, omega, dt) {
+    const y0 = s.p - (g1 - v * dt);
+    const yv = clamp(s.v - v, -MAX_REL_VEL, MAX_REL_VEL);
+    const j = yv + omega * y0;
+    const e = Math.exp(-omega * dt);
+    s.p = g1 + (y0 + j * dt) * e;
+    s.v = v + (yv - j * omega * dt) * e;
+  }
+
+  // Low-pass that follows a growing velocity gently but a shrinking (or reversing) one quickly:
+  // suspension bounce averages out toward zero, while a landing or wall hit is tracked at once.
+  function smoothVel(cur, target, rise, dt) {
+    const shrinking = target * cur < 0 || Math.abs(target) < Math.abs(cur);
+    return U.damp(cur, target, shrinking ? VEL_RELEASE : rise, dt);
+  }
+
+  class Camera {
+    constructor() {
+      this.x = 0; this.y = 0;
+      this.cx = 0; this.cy = 0;
+      this.zoom = 40; this.baseZoom = 40;
+      this.viewW = 960; this.viewH = 540;
+      this.shakeX = 0; this.shakeY = 0;
+      this.reducedMotion = false;
+      this._fx = { p: 0, v: 0 };
+      this._fy = { p: 0, v: 0 };
+      this._svx = 0; this._svy = 0;
+      this._lookX = 0; this._lookY = 0;
+      this._zoomMul = 1;
+      this._shakeAmp = 0; this._shakeLeft = 0; this._shakeDur = 0; this._t = 0;
+      this._noiseX = U.makeNoise1D(0x5eed01);
+      this._noiseY = U.makeNoise1D(0x5eed02);
+      this.setViewport(960, 540);
+    }
+
+    setViewport(w, h) {
+      this.viewW = isNum(w) && w > 0 ? w : this.viewW;
+      this.viewH = isNum(h) && h > 0 ? h : this.viewH;
+      this.baseZoom = Math.max(4, Math.min(this.viewH / VIEW_METERS_H, this.viewW / VIEW_METERS_W));
+      this.zoom = this.baseZoom * this._zoomMul;
+    }
+
+    // Snap to a target without any easing (new run, restart, teleport).
+    reset(x, y) {
+      x = isNum(x) ? x : 0; y = isNum(y) ? y : 0;
+      this._zoomMul = 1;
+      this.zoom = this.baseZoom;
+      this._svx = 0; this._svy = 0;
+      this._lookX = 0;
+      this._lookY = 0;
+      this._fx.p = x; this._fx.v = 0;
+      this._fy.p = y; this._fy.v = 0;
+      this._shakeAmp = 0; this._shakeLeft = 0;
+      this.shakeX = 0; this.shakeY = 0;
+      this.x = x;
+      this.y = y + VERTICAL_BIAS * this.viewH / this.zoom;
+      this.cx = this.x; this.cy = this.y;
+    }
+
+    update(dt, target, opts) {
+      dt = isNum(dt) ? clamp(dt, 0, 0.1) : 0;
+      const reduced = !!(opts && opts.reducedMotion);
+      this.reducedMotion = reduced;
+      if (target) {
+        const tx = isNum(target.x) ? target.x : this._fx.p;
+        const ty = isNum(target.y) ? target.y : this._fy.p;
+        const tvx = isNum(target.vx) ? clamp(target.vx, -80, 80) : 0;
+        const tvy = isNum(target.vy) ? clamp(target.vy, -80, 80) : 0;
+        const air = isNum(target.airTime) ? Math.max(0, target.airTime) : 0;
+        const hag = target.heightAboveGround;
+
+        // Low-passed velocity drives look-ahead and zoom (suspension jitter filtered out).
+        this._svx = smoothVel(this._svx, tvx, VEL_SMOOTH_X, dt);
+        this._svy = smoothVel(this._svy, tvy, VEL_SMOOTH_Y, dt);
+
+        // Zoom: out with speed and on big air.
+        const speed = Math.hypot(this._svx, this._svy);
+        let speedOut = MAX_SPEED_ZOOM * U.smoothstep(9, 34, speed);
+        let airOut = MAX_AIR_ZOOM * U.smoothstep(0.35, 1.3, air) *
+          (isNum(hag) ? U.smoothstep(2.5, 10, hag) : U.smoothstep(0.6, 1.8, air));
+        if (reduced) { speedOut *= 0.5; airOut *= 0.5; }
+        const out = Math.min(MAX_TOTAL_ZOOM, 1 - (1 - speedOut) * (1 - airOut));
+        const zt = 1 - out;
+        // zoom out a little quicker than back in
+        this._zoomMul = U.damp(this._zoomMul, zt, zt < this._zoomMul ? 1.5 : 0.9, dt);
+        this.zoom = this.baseZoom * this._zoomMul;
+
+        const viewWm = this.viewW / this.zoom, viewHm = this.viewH / this.zoom;
+        // vertical speed with a soft dead zone: suspension bounce (< ~1 m/s) never moves the view
+        const svy = this._svy;
+        const vyd = svy > FF_DEADZONE_Y ? svy - FF_DEADZONE_Y : svy < -FF_DEADZONE_Y ? svy + FF_DEADZONE_Y : 0;
+        const lookXt = clamp(this._svx * LOOK_X_PER_MS, -0.1 * viewWm, 0.25 * viewWm);
+        const lookYt = clamp(vyd * LOOK_Y_PER_MS, -0.22 * viewHm, 0.14 * viewHm);
+        this._lookX = U.damp(this._lookX, lookXt, LOOK_SMOOTH, dt);
+        const ly = this._lookY;
+        const lyRate = lookYt * ly < 0 || Math.abs(lookYt) < Math.abs(ly) ? LOOK_RELEASE_Y : LOOK_SMOOTH_Y;
+        this._lookY = U.damp(ly, lookYt, lyRate, dt);
+        const biasY = VERTICAL_BIAS * viewHm;
+
+        // Spring follow with velocity feed-forward (no speed-dependent lag, frame-rate independent).
+        if (dt > 0) {
+          springStep(this._fx, tx, this._svx, OMEGA_X, dt);
+          springStep(this._fy, ty, vyd, OMEGA_Y, dt);
+        }
+
+        let cx = this._fx.p + this._lookX;
+        let cy = this._fy.p + this._lookY + biasY;
+        // Containment: never let the vehicle leave the frame.
+        const limX = CONTAIN_X * viewWm, limY = CONTAIN_Y * viewHm;
+        if (tx - cx > limX) { this._fx.p += tx - cx - limX; cx = tx - limX; }
+        else if (cx - tx > limX) { this._fx.p -= cx - tx - limX; cx = tx + limX; }
+        if (ty - cy > limY) { this._fy.p += ty - cy - limY; cy = ty - limY; }
+        else if (cy - ty > limY) { this._fy.p -= cy - ty - limY; cy = ty + limY; }
+        if (!isNum(cx) || !isNum(cy)) { this.reset(tx, ty); cx = this.x; cy = this.y; }
+        this.x = cx; this.y = cy;
+      }
+
+      // Shake: smooth noise, quadratic decay.
+      this._t += dt;
+      if (this._shakeLeft > 0) {
+        this._shakeLeft = Math.max(0, this._shakeLeft - dt);
+        const k = this._shakeDur > 0 ? this._shakeLeft / this._shakeDur : 0;
+        const a = this._shakeAmp * k * k * (reduced ? 0.15 : 1);
+        const f = 17;
+        this.shakeX = a * this._noiseX(this._t * f);
+        this.shakeY = a * this._noiseY(this._t * f + 31.7);
+        if (this._shakeLeft === 0) { this._shakeAmp = 0; this.shakeX = 0; this.shakeY = 0; }
+      } else {
+        this.shakeX = 0; this.shakeY = 0;
+      }
+      this.cx = this.x + this.shakeX;
+      this.cy = this.y + this.shakeY;
+    }
+
+    // Add screen shake (world metres). Stronger shakes override weaker ones; never accumulates wildly.
+    shake(intensity, duration) {
+      if (!isNum(intensity) || intensity <= 0) return;
+      intensity = Math.min(intensity, 2.5);
+      duration = isNum(duration) && duration > 0 ? Math.min(duration, 3) : 0.35;
+      const k = this._shakeDur > 0 ? this._shakeLeft / this._shakeDur : 0;
+      const current = this._shakeAmp * k * k;
+      if (intensity >= current) {
+        this._shakeAmp = intensity;
+        this._shakeDur = duration;
+        this._shakeLeft = duration;
+      } else {
+        this._shakeLeft = Math.max(this._shakeLeft, Math.min(duration, this._shakeDur));
+      }
+    }
+
+    worldToScreen(wx, wy, out) {
+      out = out || { x: 0, y: 0 };
+      out.x = this.viewW * 0.5 + (wx - this.cx) * this.zoom;
+      out.y = this.viewH * 0.5 - (wy - this.cy) * this.zoom;
+      return out;
+    }
+
+    screenToWorld(sx, sy, out) {
+      out = out || { x: 0, y: 0 };
+      out.x = this.cx + (sx - this.viewW * 0.5) / this.zoom;
+      out.y = this.cy - (sy - this.viewH * 0.5) / this.zoom;
+      return out;
+    }
+
+    bounds(out) {
+      out = out || { left: 0, right: 0, bottom: 0, top: 0 };
+      const hw = this.viewW * 0.5 / this.zoom, hh = this.viewH * 0.5 / this.zoom;
+      out.left = this.cx - hw;
+      out.right = this.cx + hw;
+      out.bottom = this.cy - hh;
+      out.top = this.cy + hh;
+      return out;
+    }
+  }
+
+  RR.Camera = Camera;
+})();
