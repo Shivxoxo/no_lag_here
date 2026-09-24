@@ -17,6 +17,12 @@
  *  - claim(id) → {ok, reward, reason?, levelUp?}; claimBonus() → {ok, reward, reason?, levelUp?}.
  *  - Completing a mission increments stats.missionsCompleted.
  *  - 'missionComplete' / 'missionClaimed' payloads carry a copy of the instance.
+ *  - Midnight rollover is automatic: getActive(), track(), claim(), claimableCount(), canClaimBonus()
+ *    and claimBonus() first roll the set over when the stored day is not today (the day key is cached
+ *    for 1 s, so the hot path stays cheap). When a set is replaced by a later day's, its completed but
+ *    unclaimed missions — and the all-claimed bonus they earn — are paid automatically and Bus
+ *    'missionAutoClaim' {missions:[copies], bonus:bool, reward:{coins,xp,tokens}, levelUp, day} is
+ *    emitted so the UI can toast.
  */
 (function () {
   'use strict';
@@ -112,19 +118,53 @@
     });
   }
 
+  // Today's key, recomputed at most once a second (track() runs every frame).
+  let dayKey = null, dayKeyAt = 0;
+  function today() {
+    const n = Date.now();
+    if (dayKey === null || Math.abs(n - dayKeyAt) > 1000) { dayKey = U.todayKey(); dayKeyAt = n; }
+    return dayKey;
+  }
+  const isCurrent = (ms) => !!ms && ms.day === today() && Array.isArray(ms.active) && ms.active.length === COUNT;
+
+  // Pays what a set that is being replaced still owes: completed-but-unclaimed missions and, when
+  // that makes the whole set claimed, the daily bonus. Emits 'missionAutoClaim'.
+  function settleOldSet(ms) {
+    if (!ms || !ms.day || !Array.isArray(ms.active) || ms.active.length !== COUNT || !RR.Progression) return;
+    const owed = ms.active.filter((m) => m.completed && !m.claimed);
+    const bonus = !ms.bonusClaimed && ms.active.every((m) => m.claimed || m.completed);
+    if (!owed.length && !bonus) return;
+    const reward = { coins: 0, xp: 0, tokens: 0 };
+    for (const m of owed) {
+      m.claimed = true;
+      reward.coins += m.reward.coins; reward.xp += m.reward.xp; reward.tokens += m.reward.tokens;
+    }
+    if (bonus) {
+      ms.bonusClaimed = true;
+      reward.coins += BONUS.coins; reward.xp += BONUS.xp; reward.tokens += BONUS.tokens;
+    }
+    const levelUp = grant(reward);
+    emit('missionAutoClaim', { missions: owed.map(copy), bonus, reward, levelUp, day: ms.day });
+  }
+
   function ensureToday(date) {
     const d = S();
     const day = U.todayKey(date);
     const ms = d.missions;
     if (ms.day === day && Array.isArray(ms.active) && ms.active.length === COUNT) return ms.active;
-    d.missions = { day, active: generate(date, d.level, d.unlockedWorlds), bonusClaimed: false };
-    RR.Save.save();
+    const P = RR.Progression;
+    const roll = () => {
+      settleOldSet(ms);
+      d.missions = { day, active: generate(date, d.level, d.unlockedWorlds), bonusClaimed: false };
+      RR.Save.save();
+    };
+    if (P && P.batch) P.batch(roll); else roll();
     return d.missions.active;
   }
 
   function getActive() {
     const ms = S().missions;
-    if (!ms.day || !Array.isArray(ms.active) || ms.active.length !== COUNT) return ensureToday();
+    if (!isCurrent(ms)) return ensureToday();
     return ms.active;
   }
 
@@ -133,7 +173,7 @@
     if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return EMPTY;
     const ms = S().missions;
     let active = ms.active;
-    if (!ms.day || !active || active.length !== COUNT) active = ensureToday();
+    if (!isCurrent(ms)) active = ensureToday();
     let done = null;
     for (let i = 0; i < active.length; i++) {
       const m = active[i];
@@ -159,7 +199,7 @@
   }
 
   function claim(id) {
-    const m = S().missions.active.find((x) => x.id === id);
+    const m = getActive().find((x) => x.id === id);
     if (!m) return { ok: false, reason: 'unknown', reward: null };
     if (!m.completed) return { ok: false, reason: 'incomplete', reward: null };
     if (m.claimed) return { ok: false, reason: 'claimed', reward: null };
@@ -180,13 +220,14 @@
   }
 
   function canClaimBonus() {
+    getActive(); // rolls over (and settles yesterday's set, bonus included) after midnight
     const ms = S().missions;
-    // Not tied to "today": a set fully claimed just before midnight can still pay out its bonus.
     return !!ms.day && !ms.bonusClaimed &&
       ms.active.length === COUNT && ms.active.every((m) => m.claimed);
   }
 
   function claimBonus() {
+    getActive();
     const ms = S().missions;
     if (ms.bonusClaimed) return { ok: false, reason: 'claimed', reward: null };
     if (!canClaimBonus()) return { ok: false, reason: 'incomplete', reward: null };

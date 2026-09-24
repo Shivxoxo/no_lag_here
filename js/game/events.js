@@ -28,6 +28,16 @@
  *  - ev.active                    read-only list of active event records {id, hazard, t, warnedAt, ...}.
  *  - ev.hazardActive() → bool; ev.stats {started{id:n}, knocks, crashes, fuelZaps, launches, bossCleared}
  *  - ev.onDamage = fn(id, kind, sinceWarning)  optional hook called on every hazard hit (tests, analytics).
+ *  - AMBIENT WIND (gameplay-3): Storm Planet and daily wind modifiers (windMul > 1) get a gust field that
+ *    swings between head- and tailwind every ~10-15 s regardless of sections: ev.ambAmp (m/s², 0 = none),
+ *    ev.ambientWind(t?) = the world wind without events/sections. env.wind = ambientWind + wind_gust
+ *    events + THE STORM term, clamped ±20. wind_gust is picked twice as often when ambAmp > 0. On an
+ *    uncleared boss climb the ambient gusts ease to 40 % (ev.ambBossMul) — the headwall is a climb, not a
+ *    wind lottery (upgraded cars were flipped over backwards at crawl speed).
+ *  - ev.jumpSfxAt = ev.time of the last pad / moving-ramp 'jump' SFX (Run skips its own take-off cue).
+ *  - Lava eruptions / meteor showers are aimed so a car HOLDING its speed is never hit (see
+ *    _findEruptionPoint / meteor_shower.start); fuel_zone is unavailable under modifiers.noFuelPickups;
+ *    the boss summit also pays out when coasting over it out of fuel (state 'nofuel').
  *  - RR.EventSystem.EVENT_IDS, RR.EventSystem.HAZARDS (ids that count as hazards), RR.EventSystem.MIN_TELEGRAPH.
  *  - 'wind_gust' is treated as a hazard for scheduling (never overlaps a hazard, not in attract mode),
  *    although it never damages the vehicle directly.
@@ -60,6 +70,16 @@
   const METEOR_TELEGRAPH = 1.8;
   const LIGHTNING_TELEGRAPH = 1.8;
   const LAVA_TELEGRAPH = 2.0;
+  const BOSS_AMB_MUL = 0.4;         // ambient gusts are damped to this share on an uncleared boss climb …
+  const BOSS_AMB_RATE = 1.2;        // … eased at this rate (1/s), so the crux is a climb, not a wind lottery
+  const STEEP_SLOPE = 0.35;         // 'STEEP CLIMB AHEAD' window: slope ≥ this (≈ 19°) …
+  const STEEP_WIN = 12;             // … for ≥ this many metres …
+  const STEEP_RISE = 4;             // … rising ≥ this many metres
+  const LAVA_ERUPT_DUR = 2.2;       // s the column stands (after the telegraph)
+  const LAVA_HALF_W = 0.85;         // half width of the column (m)
+  const CAR_HALF_LEN = 2.2;         // m from the chassis centre to either bumper (+ margin)
+  const LAVA_T_MARGIN = 0.25;       // s of clearance a steady-speed car keeps from the active column
+  const METEOR_CLEAR = 6.5;         // m between a steady-speed car's centre and an impact (4 m blast + car)
   const DRONE_ARM = 1.6;            // drones are harmless for this long after spawning
   const DRONE_LOW = 1.4, DRONE_HIGH = 5.4; // drone centre height band above the ground (m)
 
@@ -236,7 +256,8 @@
   // ---------------------------------------------------------------- fuel bonus zone
   DEFS.fuel_zone = {
     weight: 0.7,
-    available() { return true; },
+    // never in the 'Last Drop' daily (modifiers.noFuelPickups): a refill zone would void the modifier
+    available(sys) { return !(sys.run.modifiers && sys.run.modifiers.noFuelPickups); },
     start(sys, rec) {
       const b = sys.run.body;
       const v = clamp(safeNum(b.vx, 0), 0, 30);
@@ -334,19 +355,42 @@
   DEFS.meteor_shower = {
     weight: 1.4,
     available(sys) { return !sys._inCaveAhead(80); },
+    // Fair aim: the impacts land either just BEHIND where a car holding its speed will be (it drives
+    // over the rings before they strike) or well AHEAD of it (they strike before it arrives). Only a
+    // player who brakes (early set) or surges (late set) is caught. Each impact keeps ≥ METEOR_CLEAR
+    // from the steady-speed car at its impact time.
     start(sys, rec) {
       const b = sys.run.body, rng = sys.rng;
       const v = clamp(safeNum(b.vx, 0), 3, 28);
       const n = rng.int(3, 5);
-      const cx = Math.max(b.x + v * rng.range(2.8, 4.2), b.x + 18);
       const spacing = rng.range(6, 10);
-      rec.shots = [];
+      const offs = [], hits = [], flights = [], ats = [];
       let at = METEOR_TELEGRAPH;
       for (let i = 0; i < n; i++) {
-        const x = cx + (i - (n - 1) / 2) * spacing + rng.range(-1, 1);
+        offs.push((i - (n - 1) / 2) * spacing + rng.range(-1, 1));
         const flight = rng.range(0.9, 1.2);
-        rec.shots.push({ x, at, flight, spawned: false, marker: sys._addMarker('meteor', x, at + flight, rec) });
+        ats.push(at);
+        flights.push(flight);
+        hits.push(at + flight);
         at += rng.range(0.25, 0.5);
+      }
+      const early = rng.next() < 0.5;
+      // bounds on the centre offset (relative to the car) for each plan
+      let eMax = Infinity, lMin = -Infinity;
+      for (let i = 0; i < n; i++) {
+        eMax = Math.min(eMax, v * hits[i] - METEOR_CLEAR - offs[i]);
+        lMin = Math.max(lMin, v * hits[i] + METEOR_CLEAR - offs[i]);
+      }
+      const lo = offs[0], hi = offs[n - 1];
+      const eOk = eMax + lo >= 3;                       // nearest ring still ahead of the car
+      const lOk = lMin + hi <= 110;                     // farthest ring not absurdly far off
+      const eC = Math.min(v * rng.range(1.0, 1.6), eMax);
+      const lC = Math.max(v * rng.range(5, 6), lMin, 18 - lo);
+      const c = (early && eOk) || !lOk ? (eOk ? eC : lC) : lC;
+      rec.shots = [];
+      for (let i = 0; i < n; i++) {
+        const x = b.x + c + offs[i];
+        rec.shots.push({ x, at: ats[i], flight: flights[i], spawned: false, marker: sys._addMarker('meteor', x, hits[i], rec) });
       }
       sys._warn('METEOR SHOWER!', 'hazard');
       return true;
@@ -374,8 +418,8 @@
       rec.H = sys.rng.range(8, 12);
       const ceil = sys._ceiling(x);
       if (ceil !== null) rec.H = Math.max(3, Math.min(rec.H, ceil - rec.y - 0.3));
-      rec.hw = 0.85;                 // half width of the column (m)
-      rec.eruptDur = 2.2;
+      rec.hw = LAVA_HALF_W;          // half width of the column (m)
+      rec.eruptDur = LAVA_ERUPT_DUR;
       rec.h = 0;
       rec.hit = false;
       rec.erupted = false;
@@ -566,6 +610,12 @@
 
       const wid = this.world.id || '';
       this._stormWorld = wid === 'storm_planet' || safeNum(this.world.wind && this.world.wind.base, 0) >= 1.5;
+      // Ambient gust field (independent of sections): Storm Planet's 'hurricane winds' and the daily wind
+      // modifiers (Gale Force / Chaos) roll gusts through that swing between head- and tailwind every
+      // ~10-15 s. Phase from its own fork of the seed so the gameplay stream (event layout) is unchanged.
+      this.ambAmp = this._ambientAmp();
+      this.ambPhase = U.makeRng(U.hash2(rng.seed >>> 0, U.hashString('ambient-wind'))).range(0, TAU);
+      this.ambBossMul = 1;                           // eases to BOSS_AMB_MUL while an uncleared boss climb is on
       this._snowy = this.world.surface === 'snow' || this.world.ambient === 'snow';
 
       // pools ----------------------------------------------------------
@@ -619,6 +669,7 @@
       this.blend = { storm: 0, cave: 0, volcano: 0, moon: 0 };
       this.stormAmp = 7;
       this.stormPhase = 0;
+      this.ambBossMul = 1;
       this.flash = 0;
       this.nextFlashAt = 0;
       this._seenSections = new Set();
@@ -626,6 +677,7 @@
       if (this._bossMusic) this._restoreMusic();
       this._bossMusic = false;
       this.padCool = 0;
+      this.jumpSfxAt = -Infinity;        // this.time of the last pad / ramp 'jump' SFX (Run skips its own take-off cue)
       this.boostTime = 0;
       this.boostPower = 1;
       this.boostSfxCool = 0;
@@ -703,6 +755,10 @@
 
       this._updateSection(dt);
       this._updateBoss();
+      if (this.ambAmp > 0) {
+        const tgt = run.boss && run.boss.active ? BOSS_AMB_MUL : 1;
+        this.ambBossMul += (tgt - this.ambBossMul) * Math.min(1, dt * BOSS_AMB_RATE);
+      }
       this._schedule();
 
       // active events
@@ -801,6 +857,7 @@
         let wgt = def.weight;
         if (id === 'lava_eruption' && sid === 'volcano') wgt *= 3;
         if (id === 'fuel_zone') wgt *= 1 + (1 - fuelFrac) * 1.5;
+        if (id === 'wind_gust' && self.ambAmp > 0) wgt *= 2;      // windy worlds / wind dailies: gusts twice as often
         if (wgt <= 0) return 0;
         return def.available(self) ? wgt : 0;
       }, this.rng);
@@ -954,7 +1011,8 @@
       const span = Math.max(1, boss.summitX - boss.start);
       const p = clamp((b.x - boss.start) / span, 0, 1);
       if (p > safeNum(boss.progress, 0)) boss.progress = p;
-      if (b.x >= boss.summitX && (!run.state || run.state === 'running')) this._clearBoss(boss);
+      // coasting over the summit out of fuel ('nofuel') still counts; only 'crashed' / 'ended' block it
+      if (b.x >= boss.summitX && (!run.state || run.state === 'running' || run.state === 'nofuel')) this._clearBoss(boss);
     }
 
     _clearBoss(boss) {
@@ -992,8 +1050,7 @@
       if (!run) return;
       if (!run.env || typeof run.env !== 'object') run.env = {};
       const env = run.env, w = this.world, bl = this.blend;
-      const base = safeNum(w.wind && w.wind.base, 0) * this._windMul();
-      let wind = base;
+      let wind = this.ambientWind();
       let fuelZone = false;
       for (let i = 0; i < this.active.length; i++) {
         const rec = this.active[i];
@@ -1019,6 +1076,36 @@
       env.tint = TINTS[clamp(Math.round(safeNum(bl.volcano, 0) * TINT_STEPS), 0, TINT_STEPS)];
       env.sectionId = this.section ? this.section.id : null;
       env.fuelZone = fuelZone;
+    }
+
+    // World wind without events / sections at sim time t (default: now): base × windMul, or — with an
+    // ambient gust field — a neutral-to-slightly-resisting mean (0.3·base − 0.15·amp) plus the gusts.
+    ambientWind(t) {
+      const w = this.world || {};
+      const base = safeNum(w.wind && w.wind.base, 0) * this._windMul();
+      const amb = safeNum(this.ambAmp, 0);
+      if (!(amb > 0)) return base;
+      const k = clamp(safeNum(this.ambBossMul, 1), 0, 1);   // damped on an uncleared boss climb
+      return base * 0.3 + k * amb * (this._ambientOsc(isNum(t) ? t : this.time) - 0.15);
+    }
+
+    // Ambient gust amplitude (m/s²): Storm Planet 6 (≈ 30 % of the time above 4 m/s²), plus
+    // 3.5·(windMul − 1) + 2 for daily wind modifiers (Gale Force ×2.5 → 7.25, Chaos ×1.8 → 4.8),
+    // capped at 11. 0 = no ambient field (every other world keeps its steady base wind).
+    _ambientAmp() {
+      const w = this.world || {};
+      let a = 0;
+      if (w.id === 'storm_planet' || safeNum(w.wind && w.wind.gust, 0) >= 7) a += 6;
+      const m = this._windMul();
+      if (m > 1) a += 3.5 * (m - 1) + 2;
+      return Math.min(a, 11);
+    }
+
+    // −1.25..1.25: a ~14 s swell, a faster ~4 s flutter and a slow (~90 s) smooth head/tail bias.
+    _ambientOsc(t) {
+      const ph = safeNum(this.ambPhase, 0);
+      return 0.7 * Math.sin(t * 0.45 + ph) + 0.3 * Math.sin(t * 1.6 + ph * 2.3) +
+        0.25 * clamp(3 * Math.sin(t * 0.07 + ph), -1, 1);
     }
 
     _windMul() {
@@ -1080,6 +1167,7 @@
       this._emit('star', cx, gy + 0.3, 16, 0, 3, 6, Math.PI / 2, 1.2, COLORS.bounce);
       this._emit('spark', cx, gy + 0.2, 10, 0, 2, 7, Math.PI / 2, 1.6, COLORS.bounce);
       this._sfx('jump', { pitch: 1.2 });
+      this.jumpSfxAt = this.time;
       this._shake(0.12, 0.2);
     }
 
@@ -1098,6 +1186,7 @@
       this._emit('boost', b.x, b.y - 0.6, 12, 0, 0, 6, -Math.PI / 2, 1.2, COLORS.bounce);
       this._emit('spark', rec.rx + rec.len, this._ground(rec.rx + rec.len) + rec.hgt, 12, 0, 2, 7, Math.PI / 2, 1.4, COLORS.bounce);
       this._sfx('jump');
+      this.jumpSfxAt = this.time;
       if (first) {
         // small reward: coins along the predicted ballistic arc
         const g = this._g(), vx = clamp(safeNum(b.vx, 0), 0, 40);
@@ -1632,33 +1721,49 @@
     // A climb 120–250 m ahead: a terrain 'steep' feature (dir +1) if there is one, otherwise a sustained
     // climb found directly in the heightfield (≥ 12 m long, slope ≥ 0.32, ≥ 5 m rise) — gentle worlds rarely
     // tag 'steep' features. Returns {x, x2} (feature object or a reused scratch object) or null.
+    // A real climb 60–250 m ahead (beyond the camera's right edge) to announce, or null:
+    //  1. a published terrain 'steep' feature (climbs only);
+    //  2. otherwise a scanned window of ≥ STEEP_WIN m where the slope (t.slopeAt, every 1 m) stays
+    //     ≥ STEEP_SLOPE and the ground rises ≥ STEEP_RISE;
+    //  3. otherwise, when the terrain offers t.requestFeature('steep', xMin) (optional hook: insert a
+    //     climb at ≥ xMin into not-yet-generated terrain → feature | null), a freshly requested wall.
+    // Never inside a boss climb or a jump zone.
     _findSteep() {
       const t = this.run.terrain, b = this.run.body;
-      const fs = t && Array.isArray(t.features) ? t.features : null;
+      if (!t || !b) return null;
+      const fs = Array.isArray(t.features) ? t.features : null;
+      const x0 = b.x + 60, x1 = b.x + 250;
       if (fs) {
-        for (let i = lowerBound(fs, b.x + 120); i < fs.length; i++) {
+        for (let i = lowerBound(fs, x0); i < fs.length; i++) {
           const f = fs[i];
-          if (f.x > b.x + 250) break;
+          if (f.x > x1) break;
           if (f.type !== 'steep') continue;
           if (f.meta && isNum(f.meta.dir) && f.meta.dir < 0) continue;   // climbs only
           if (this._sectionIdAt(f.x) === 'boss') continue;
           return f;
         }
       }
+      const slopeAt = typeof t.slopeAt === 'function'
+        ? (x) => safeNum(t.slopeAt(x), 0) : (x) => this._ground(x + 0.5) - this._ground(x - 0.5);
       let runStart = NaN;
-      for (let x = b.x + 120; x <= b.x + 262; x += 1) {
-        const s = this._ground(x + 1) - this._ground(x);
-        if (s >= 0.32) {
+      const xEnd = Math.min(x1, safeNum(t.maxX, x1));
+      for (let x = x0; x <= xEnd + 1; x += 1) {
+        if (x <= xEnd && slopeAt(x) >= STEEP_SLOPE) {
           if (!isNum(runStart)) runStart = x;
           continue;
         }
-        if (isNum(runStart) && x - runStart >= 12 && this._ground(x) - this._ground(runStart) >= 5 &&
-          runStart <= b.x + 250 && this._sectionIdAt(runStart) !== 'boss' && !this._inJumpZone(runStart)) {
+        if (isNum(runStart) && x - runStart >= STEEP_WIN && this._ground(x) - this._ground(runStart) >= STEEP_RISE &&
+          this._sectionIdAt(runStart) !== 'boss' && !this._inJumpZone(runStart)) {
           const out = this._steepOut || (this._steepOut = { type: 'steep', x: 0, x2: 0 });
           out.x = runStart; out.x2 = x;
           return out;
         }
         runStart = NaN;
+      }
+      if (typeof t.requestFeature === 'function' && this._sectionIdAt(b.x + 150) !== 'boss') {
+        let f = null;
+        try { f = t.requestFeature('steep', b.x + 120); } catch (e) { logOnce('requestFeature', e); f = null; }
+        if (f && isNum(f.x) && isNum(f.x2) && f.x > b.x + 40) return f;
       }
       return null;
     }
@@ -1680,22 +1785,54 @@
       return false;
     }
 
+    // Vent x for a lava eruption, or NaN. Fair aim: a car that holds its current speed passes the vent
+    // either before the column rises ('before', x ≈ car + v·(T_on − 0.6)) or after it has collapsed
+    // ('after', x ≈ car + v·(T_off + 1.0)); every candidate is checked against the car's bumpers and
+    // LAVA_T_MARGIN, so only braking into it / surging under it gets you burnt. 50/50 between the plans
+    // (the one that fits is used when only one does). probeOnly: deterministic feasibility check.
     _findEruptionPoint(probeOnly) {
-      const b = this.run.body, t = this.run.terrain;
+      const b = this.run.body;
       const v = clamp(safeNum(b.vx, 0), 4, 25);
-      const x0 = Math.max(b.x + v * (probeOnly ? 3.1 : this.rng.range(2.6, 3.6)) + 6, b.x + 22);
-      for (let k = 0; k < 8; k++) {
-        const x = x0 + k * 9;
-        if (this._sectionIdAt(x) === 'boss' || this._inJumpZone(x)) continue;
-        let bad = false;
-        for (let dx = -3; dx <= 3; dx += 1.5) {
-          const s = t && typeof t.surfaceAt === 'function' ? t.surfaceAt(x + dx) : null;
-          if (s && s.hazard) { bad = true; break; }
-          if (Math.abs(this._ground(x + dx + 0.5) - this._ground(x + dx - 0.5)) > 0.9) { bad = true; break; }
+      const tOn = LAVA_TELEGRAPH, tOff = LAVA_TELEGRAPH + LAVA_ERUPT_DUR;
+      const reach = LAVA_HALF_W + CAR_HALF_LEN;
+      // before: rear bumper clears the column LAVA_T_MARGIN before it rises
+      const bMax = v * (tOn - LAVA_T_MARGIN) - reach;
+      const bMin = 22;
+      const bTarget = clamp(v * (tOn - 0.6), bMin, bMax);
+      // after: front bumper reaches the column LAVA_T_MARGIN + 0.1 s after it is gone
+      const aMin = Math.max(22, v * (tOff + LAVA_T_MARGIN + 0.1) + reach);
+      const aTarget = Math.max(aMin, v * (tOff + 1.0));
+      const before = probeOnly ? false : this.rng.next() < 0.5;
+      const first = before ? 0 : 1;
+      for (let pass = 0; pass < 2; pass++) {
+        const plan = (first + pass) % 2;
+        if (plan === 0) {
+          if (bMax < bMin) continue;
+          // scan outward from the target inside [bMin, bMax]
+          for (let k = 0; k < 16; k++) {
+            const d = bTarget + (k % 2 ? -1 : 1) * Math.ceil(k / 2) * 3;
+            if (d < bMin || d > bMax) continue;
+            if (this._ventOk(b.x + d)) return b.x + d;
+          }
+        } else {
+          for (let k = 0; k < 10; k++) {
+            const d = aTarget + k * 6;
+            if (this._ventOk(b.x + d)) return b.x + d;
+          }
         }
-        if (!bad) return x;
       }
       return NaN;
+    }
+
+    _ventOk(x) {
+      const t = this.run.terrain;
+      if (this._sectionIdAt(x) === 'boss' || this._inJumpZone(x)) return false;
+      for (let dx = -3; dx <= 3; dx += 1.5) {
+        const s = t && typeof t.surfaceAt === 'function' ? t.surfaceAt(x + dx) : null;
+        if (s && s.hazard) return false;
+        if (Math.abs(this._ground(x + dx + 0.5) - this._ground(x + dx - 0.5)) > 0.9) return false;
+      }
+      return true;
     }
 
     // Start of a gentle window of `len` metres ahead (for the moving ramp), or NaN. Mild slopes are fine
@@ -2465,7 +2602,20 @@
           this._edgeArrow(ctx, sp.x, 18 + size, Math.PI / 2, markerColor(m.kind), size, pulse, NaN);
         }
       }
-      if (near) this._edgeArrow(ctx, W - 18, clamp(nearY, 60, H - 40), 0, markerColor(near.kind), size, pulse, near.x - run.body.x);
+      if (near) {
+        const d = near.x - run.body.x, y = clamp(nearY, 60, H - 40), col = markerColor(near.kind);
+        if (near.kind === 'lava' && d < 60) {
+          // a vent inside 60 m: pulled in from the edge at its own ground height, with a ground glow
+          ctx.globalAlpha = 0.3 + 0.35 * pulse;
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.ellipse(W - 40, y + size * 1.1, size * 1.5, size * 0.45, 0, 0, TAU);
+          ctx.fill();
+          this._edgeArrow(ctx, W - 40, y, 0, col, size * 1.2, pulse, d);
+        } else {
+          this._edgeArrow(ctx, W - 18, y, 0, col, size, pulse, d);
+        }
+      }
       for (const rec of this.active) {
         if (rec.id === 'drones') {
           for (const d of rec.drones) {
@@ -2475,11 +2625,13 @@
           }
         } else if (rec.id === 'wind_gust' && rec.intensity > 0.02) {
           this._windArrow(ctx, W / 2, small ? 70 : 88, rec, time, small);
-        } else if ((rec.id === 'fuel_zone' || rec.id === 'moving_ramp' || (rec.id === 'lava_eruption' && !(rec.marker && rec.marker.active))) && !rec.done) {
+        } else if ((rec.id === 'fuel_zone' || rec.id === 'moving_ramp' || rec.id === 'steep_surprise' ||
+          (rec.id === 'lava_eruption' && !(rec.marker && rec.marker.active))) && !rec.done) {
           const x = rec.id === 'fuel_zone' ? rec.x0 : rec.id === 'moving_ramp' ? rec.a : rec.x;
           if (run.body.x < x) {
             cam.worldToScreen(x, this._ground(x) + 1, sp);
-            const col = rec.id === 'fuel_zone' ? COLORS.fuel : rec.id === 'moving_ramp' ? COLORS.bounce : COLORS.lava;
+            const col = rec.id === 'fuel_zone' ? COLORS.fuel : rec.id === 'moving_ramp' ? COLORS.bounce :
+              rec.id === 'steep_surprise' ? '#ffcf33' : COLORS.lava;
             if (sp.x > W - 8) this._edgeArrow(ctx, W - 18, clamp(sp.y, 60, H - 40), 0, col, size, rec.hazard ? pulse : 0.85, x - run.body.x);
           }
         }

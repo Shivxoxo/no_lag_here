@@ -24,6 +24,17 @@
  *    terrain surface; sky/layers/haze are not painted below it (the terrain covers it) — saves fill-rate.
  *  - RR.Background.LAYER_FACTORS = [0.05, 0.15, 0.3, 0.5].
  *  - RR.Background.drawThumbnail caches the rendered card per (world, w, h) and re-uses it.
+ *  - bg.moonW (0..1, read-only): THE MOON section blend on non-moon worlds (env.sectionId === 'moon' or
+ *    env.gravityMul < 0.95), eased ~1 s. Sky cross-fades to the moon_base vacuum, stars + a distant Earth fade
+ *    in, the sun pales, clouds / haze / ambient weather / layer trees fade out, layers tint toward moon grey.
+ *    The renderer reads it to hide plant decorations.
+ *  - Fill-rate (review visuals-3): each parallax layer (and its haze) is painted only down to the next
+ *    layer's baseline and the sky only down to the nearest layer's baseline (every silhouette is opaque below
+ *    its baseline); gradient strips are blitted without smoothing and sprites at whole device pixels.
+ *    LOW drops the farthest layer and the haze strips (a comparable fog tint is baked into the layer colours).
+ *  - Wind (env.wind, m/s²): rain streak slant equals the simulated drop velocity (wind·60 + drift over the
+ *    fall speed), sand blows with its sign, and faint screen-space wind streaks appear from |wind| ≈ 2.5
+ *    (full at 10) when it isn't raining hard.
  */
 (function () {
   'use strict';
@@ -67,6 +78,27 @@
     t = clamp(t, 0, 1);
     const h = (v) => ('0' + Math.round(v).toString(16)).slice(-2);
     return '#' + h(U.lerp(x.r, y.r, t)) + h(U.lerp(x.g, y.g, t)) + h(U.lerp(x.b, y.b, t));
+  }
+  const rgbHex = (c) => '#' + [c.r, c.g, c.b].map((v) => ('0' + clamp(v | 0, 0, 255).toString(16)).slice(-2)).join('');
+  // Four parallax layer colours for a palette. Atmospheric perspective: far layers pulled toward the
+  // horizon colour (less in dark worlds, where silhouettes must stay darker than the glowing horizon).
+  function layerPalette(P) {
+    const horizon = P.horizon || '#eaf7ff';
+    const far = P.far || '#9cc0d6', mid = P.mid || '#6fa45c', near = P.near || '#4d8a3b';
+    const haze = luminance(P.skyTop || '#3d8fdc') < 0.16 ? 0.16 : 0.3;
+    return [mixHex(far, horizon, haze), mixHex(far, mid, 0.35), mid, near];
+  }
+  const MOON_FALLBACK = Object.freeze({ skyTop: '#03040c', skyBottom: '#161b36', horizon: '#252c52', far: '#343a52', mid: '#50566b', near: '#666b7e' });
+  function moonPalette() {
+    const m = RR.Worlds && RR.Worlds.byId ? RR.Worlds.byId('moon_base') : null;
+    return (m && m.palette) || MOON_FALLBACK;
+  }
+  let moonLayerCache = null;
+  function moonLayers() { return moonLayerCache || (moonLayerCache = layerPalette(moonPalette())); }
+  // Rain streak slant (dx per unit dy) = horizontal / vertical drop speed, as simulated in _updateWeather:
+  // vx = wind·60 + drift, vy = fall·(0.6 + 0.4·depth). Clamped so a gale reads as ~55° rain, not sideways.
+  function rainSlant(wind, drift, fall, depth) {
+    return clamp((wind * 60 + drift) / (fall * (0.6 + 0.4 * depth)), -1.4, 1.4);
   }
   // fractional part in [0, 1), safe for negative inputs
   const frac = (v) => { const f = v - Math.floor(v); return f === f ? f : 0; };
@@ -168,6 +200,7 @@
       this._w = 0; this._h = 0;
       this._cols = new Float32Array(1024);      // silhouette column y (px)
       this._tops = new Float32Array(64);        // volcano/spire tip scratch (x, y pairs)
+      this._baseY = new Float32Array(8);        // per-frame layer baselines (screen px)
       this._nTops = 0;
       // weather pool (screen px)
       const WC = 420;
@@ -188,20 +221,20 @@
       this.cfg = WORLD_CFG[wd.id] || DEFAULT_CFG;
       const P = wd.palette || {};
       const horizon = P.horizon || '#eaf7ff';
-      const far = P.far || '#9cc0d6', mid = P.mid || '#6fa45c', near = P.near || '#4d8a3b';
-      // atmospheric perspective: far layers pulled toward the horizon colour (less in dark worlds, where
-      // silhouettes must stay darker than the glowing horizon to read)
-      const darkSky = luminance(P.skyTop || '#3d8fdc') < 0.16;
-      const haze = darkSky ? 0.16 : 0.3;
-      this.layerColors = [mixHex(far, horizon, haze), mixHex(far, mid, 0.35), mid, near];
-      this.layerShade = this.layerColors.map((c) => mixHex(c, '#000000', 0.18));
-      this.layerLight = this.layerColors.map((c) => mixHex(c, '#ffffff', 0.22));
+      this._layerBase = layerPalette(P);
       this.pal = {
         skyTop: P.skyTop || '#3d8fdc', skyBottom: P.skyBottom || '#bfe6ff', horizon,
         cloud: P.cloud || '#ffffff', accent: P.accent || '#ffd34d', fog: parseColor(P.fog || 'rgba(225,242,255,0.22)'),
         hazard: P.hazard || '#ff6a1f'
       };
       this.dark = luminance(this.pal.skyTop) < 0.16;
+      // LOW skips the haze strips: bake a comparable amount of fog into the three far layers instead
+      const fogHex = rgbHex(this.pal.fog);
+      const fogK = Math.min(0.3, this.pal.fog.a * 1.2);
+      this._layerLowBase = this._layerBase.map((c, i) => (i < 3 ? mixHex(c, fogHex, fogK * (i === 0 ? 1 : i === 1 ? 0.6 : 0.3)) : c));
+      this.moonW = 0; this._moonTarget = 0; this._moonKey = -1;
+      this._isMoonWorld = wd.id === 'moon_base';
+      this._refreshLayers();
       this._noise = [];
       for (let k = 0; k < 4; k++) this._noise.push(U.makeNoise1D(U.hash2(this.seed, 101 + k)));
       // stars (normalized screen positions)
@@ -228,6 +261,7 @@
       this._cloudSprites = null; this._cloudKey = '';
       this._skyGrad = null; this._skyW = -1; this._skyStrip = null; this._hazeStrip = null;
       this._hazeGrad = null; this._fogGrad = null;
+      this._moonStars = null; this._earth = null; this._earthKey = '';
       this._wInitFor = '';
       this._yRef = null;
     }
@@ -236,6 +270,22 @@
       this.quality = QUALITY[q] ? q : 'high';
       this._q = QUALITY[this.quality];
       this._wInitFor = '';
+      this._moonKey = -1;
+      this._refreshLayers();
+    }
+
+    // Layer fill / shade / rim colours for the current quality and MOON-section blend.
+    _refreshLayers() {
+      const base = this.quality === 'low' && this._layerLowBase ? this._layerLowBase : this._layerBase;
+      if (!base) return;
+      const mw = U.safeNum(this.moonW, 0);
+      const key = Math.round(mw * 32) + (this.quality === 'low' ? 100 : 0);
+      if (key === this._moonKey && this.layerColors) return;
+      this._moonKey = key;
+      const moon = mw > 0 ? moonLayers() : null;
+      this.layerColors = base.map((c, i) => (moon ? mixHex(c, moon[i], (key % 100) / 32 * 0.85) : c));
+      this.layerShade = this.layerColors.map((c) => mixHex(c, '#000000', 0.18));
+      this.layerLight = this.layerColors.map((c) => mixHex(c, '#ffffff', 0.22));
     }
 
     flash(intensity, bolt) {
@@ -268,6 +318,18 @@
         if (Math.abs(cy - this._yRef) > 60) this._yRef = cy - Math.sign(cy - this._yRef) * 60;
       }
       this._rainN = env && isNum(env.rain) ? clamp(env.rain, 0, 1) : 0;
+      // THE MOON section outside moon_base: sky → dark starry vacuum, eased over ~1 s
+      let mt = 0;
+      if (!this._isMoonWorld && env) {
+        const gm = isNum(env.gravityMul) ? env.gravityMul : 1;
+        if (env.sectionId === 'moon' || gm < 0.95) mt = U.smoothstep(0, 1, (1 - gm) / 0.55);
+      }
+      this._moonTarget = mt;
+      if (this.moonW !== mt) {
+        this.moonW = dt > 0 ? U.approach(this.moonW, mt, dt * 1.5) : mt;
+        if (Math.abs(this.moonW - mt) < 0.002) this.moonW = mt;
+        this._refreshLayers();
+      }
       this._updateWeather(dt, camera);
     }
 
@@ -280,6 +342,8 @@
       const camY = isNum(cam.cy) ? cam.cy : U.safeNum(cam.y, 0);
       const zoom = cam.zoom > 0 ? cam.zoom : h / 15;
       const s = h / 720;
+      const moonW = U.safeNum(this.moonW, 0);
+      const low = this.quality === 'low';
 
       // 1. static backdrop: sky gradient + celestial body, pre-rendered once per size (gradients are the
       //    most expensive fills on software-rasterised canvases; a blit is cheap everywhere)
@@ -287,58 +351,137 @@
       // everything below `floor` is covered by the caller's terrain → don't paint it (fill-rate saver)
       const floor = isNum(this.floorY) ? clamp(this.floorY + 2, h * 0.3, h) : h;
       this._floor = floor;
+      // layer baselines first: every silhouette is opaque below its own baseline, so each layer (and its
+      // haze) only needs painting down to the NEXT layer's baseline, and the sky only down to the nearest
+      // layer's baseline — cuts the sky pass overdraw roughly in half at no visual change
+      const dy = this._yRef === null ? 0 : camY - this._yRef;
+      const layers = this.cfg.layers;
+      const nL = layers.length, BY = this._baseY;
+      for (let li = 0; li < nL; li++) {
+        const f = LAYER_FACTORS[li] || 0.5;
+        BY[li] = layers[li].base * h + clamp(dy * zoom * f * 0.6, -0.18 * h, 0.22 * h);
+      }
+      const skyBottom = nL ? Math.min(floor, BY[nL - 1] + 2) : floor;
+      // Gradient strips are blitted WITHOUT smoothing: a bilinear stretch of a 4×256 strip over the screen
+      // costs ~6 ms at 1080p on a software rasteriser vs < 1 ms nearest-neighbour; the strips have ≥ 128
+      // rows of a smooth gradient, so nearest sampling shows no banding beyond 8-bit quantisation.
+      const smooth = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = false;
       if (this._skyStrip) {
-        ctx.drawImage(this._skyStrip, 0, 0, 4, Math.max(1, 256 * floor / h), 0, 0, w, floor);
+        ctx.drawImage(this._skyStrip, 0, 0, 4, Math.max(1, 256 * skyBottom / h), 0, 0, w, skyBottom);
       } else {
         ctx.fillStyle = this._skyGrad;
-        ctx.fillRect(0, 0, w, floor);
+        ctx.fillRect(0, 0, w, skyBottom);
       }
+      if (moonW > 0.004) this._drawMoonSky(ctx, w, h, skyBottom, moonW);
+      ctx.imageSmoothingEnabled = smooth;
       // 2. stars (twinkle per frame)
-      if (this._stars.length) this._drawStars(ctx, w, h, camX * zoom);
-      // 3. celestial body (pre-rendered at device resolution)
-      this._drawCelestial(ctx, w, h);
+      if (this._stars.length) this._drawStars(ctx, w, h, camX * zoom, this._stars, 1);
+      if (moonW > 0.004) this._drawStars(ctx, w, h, camX * zoom, this._moonStarSet(), moonW);
+      // 3. celestial body (pre-rendered at device resolution); inside THE MOON the sun pales and Earth rises
+      this._drawCelestial(ctx, w, h, 1 - 0.72 * moonW);
+      if (moonW > 0.004) this._drawEarth(ctx, w, h, moonW);
       if (this._shoot.t >= 0) this._drawShootingStar(ctx, s);
       // 4. far clouds
-      this._drawClouds(ctx, w, h, camX * zoom, 0);
+      const cloudK = 1 - moonW;
+      if (cloudK > 0.01) this._drawClouds(ctx, w, h, camX * zoom, 0, cloudK);
       // lightning illuminates the sky behind the layers
       if (this._flash > 0.05) {
         ctx.fillStyle = 'rgba(200,220,255,' + (this._flash * 0.28).toFixed(3) + ')';
-        ctx.fillRect(0, 0, w, h);
+        ctx.fillRect(0, 0, w, skyBottom);
         if (this._boltN > 1) this._drawBolt(ctx, w, h);
       }
-      // 5. parallax layers
-      const dy = this._yRef === null ? 0 : camY - this._yRef;
-      const layers = this.cfg.layers;
-      for (let li = 0; li < layers.length; li++) {
+      // 5. parallax layers (LOW drops the farthest one and the haze strips; fog is baked into the colours)
+      const hazeK = 1 - 0.7 * moonW;
+      for (let li = low && nL > 3 ? 1 : 0; li < nL; li++) {
         const L = layers[li];
         const f = LAYER_FACTORS[li] || 0.5;
         const scroll = camX * zoom * f;
-        const vshift = clamp(dy * zoom * f * 0.6, -0.18 * h, 0.22 * h);
-        const baseY = L.base * h + vshift;
-        this._drawLayer(ctx, li, L, w, h, s, scroll, baseY);
+        const baseY = BY[li];
+        const bottom = li < nL - 1 ? Math.min(floor, BY[li + 1] + 1) : floor;
+        this._drawLayer(ctx, li, L, w, h, s, scroll, baseY, bottom);
         // haze band at the foot of the three farther layers (pre-rendered gradient strip, stretched)
-        if (li < 3) {
+        if (li < 3 && !low) {
           const bandH = h * (0.2 - li * 0.04);
           const hy = baseY - L.amp * h * 0.45, hh = bandH + L.amp * h * 0.45;
-          ctx.globalAlpha = li === 0 ? 1 : 0.6;
-          if (this._hazeStrip) ctx.drawImage(this._hazeStrip, 0, hy, w, Math.max(1, Math.min(hh, floor - hy)));
-          else {
-            ctx.save();
-            ctx.translate(0, hy);
-            ctx.scale(1, hh);
-            ctx.fillStyle = this._hazeGrad;
-            ctx.fillRect(0, 0, w, 1);
-            ctx.restore();
+          const vh = Math.min(hh, bottom - hy);
+          if (vh > 0.5) {
+            ctx.globalAlpha = (li === 0 ? 1 : 0.6) * hazeK;
+            if (this._hazeStrip) {
+              ctx.imageSmoothingEnabled = false;
+              ctx.drawImage(this._hazeStrip, 0, 0, 4, Math.max(1, 128 * vh / hh), 0, hy, w, vh);
+              ctx.imageSmoothingEnabled = smooth;
+            } else {
+              ctx.save();
+              ctx.beginPath(); ctx.rect(0, hy, w, vh); ctx.clip();
+              ctx.translate(0, hy);
+              ctx.scale(1, hh);
+              ctx.fillStyle = this._hazeGrad;
+              ctx.fillRect(0, 0, w, 1);
+              ctx.restore();
+            }
+            ctx.globalAlpha = 1;
           }
-          ctx.globalAlpha = 1;
           const y0 = baseY + bandH - 1;
-          if (y0 < floor) {
+          if (y0 < bottom) {
+            ctx.globalAlpha = hazeK;
             ctx.fillStyle = li === 0 ? this._fogSolid0 : this._fogSolid1;
-            ctx.fillRect(0, y0, w, floor - y0);
+            ctx.fillRect(0, y0, w, bottom - y0);
+            ctx.globalAlpha = 1;
           }
         }
-        if (li === 1 && this.cfg.storm) this._drawClouds(ctx, w, h, camX * zoom, 1);
+        if (li === 1 && this.cfg.storm && cloudK > 0.01) this._drawClouds(ctx, w, h, camX * zoom, 1, cloudK);
       }
+    }
+
+    // Dark vacuum sky of moon_base, cross-faded over the world's own sky (THE MOON section).
+    _drawMoonSky(ctx, w, h, bottom, k) {
+      if (this._moonStrip === undefined) {
+        const P = moonPalette();
+        const c = makeCanvas(4, 256);
+        const g = c ? c.getContext('2d') : null;
+        if (g) {
+          const gr = g.createLinearGradient(0, 0, 0, 256);
+          gr.addColorStop(0, P.skyTop); gr.addColorStop(0.5, P.skyBottom);
+          gr.addColorStop(0.8, P.horizon); gr.addColorStop(1, P.horizon);
+          g.fillStyle = gr;
+          g.fillRect(0, 0, 4, 256);
+          this._moonStrip = c;
+        } else this._moonStrip = false;
+      }
+      ctx.globalAlpha = clamp(k, 0, 1);
+      if (this._moonStrip) ctx.drawImage(this._moonStrip, 0, 0, 4, Math.max(1, 256 * bottom / h), 0, 0, w, bottom);
+      else { ctx.fillStyle = moonPalette().skyTop; ctx.fillRect(0, 0, w, bottom); }
+      ctx.globalAlpha = 1;
+    }
+
+    _moonStarSet() {
+      if (this._moonStars) return this._moonStars;
+      const n = 200, st = new Float32Array(n * 4);
+      const rng = U.makeRng(U.hash2(this.seed, 7707));
+      for (let i = 0; i < n; i++) {
+        st[i * 4] = rng.next();
+        st[i * 4 + 1] = Math.pow(rng.next(), 1.4) * 0.72;
+        st[i * 4 + 2] = rng.range(0.6, 1.9);
+        st[i * 4 + 3] = rng.range(0, TAU);
+      }
+      return (this._moonStars = st);
+    }
+
+    _drawEarth(ctx, w, h, k) {
+      let dk = 1;
+      try { const tr = ctx.getTransform ? ctx.getTransform() : null; if (tr) dk = clamp(Math.hypot(tr.a, tr.b), 0.5, 3); } catch (e) { dk = 1; }
+      dk = Math.round(dk * 4) / 4;
+      const key = h + '|' + dk;
+      if (this._earthKey !== key) { this._earth = renderCelestial('earth', h * dk, this.pal); this._earthKey = key; }
+      const spr = this._earth;
+      if (!spr) return;
+      // keep clear of the world's own sun / moon
+      const own = CELESTIAL_POS[(this.world && this.world.celestial) || 'sun'] || CELESTIAL_POS.sun;
+      const x = (own[0] > 0.5 ? 0.24 : 0.76) * w, y = 0.2 * h;
+      ctx.globalAlpha = clamp(k, 0, 1);
+      ctx.drawImage(spr.canvas, Math.round((x - spr.cx / dk) * dk) / dk, Math.round((y - spr.cy / dk) * dk) / dk, spr.canvas.width / dk, spr.canvas.height / dk);
+      ctx.globalAlpha = 1;
     }
 
     _buildBackdrop(ctx, w, h) {
@@ -389,29 +532,30 @@
       if (this._cols.length < need) this._cols = new Float32Array(need);
     }
 
-    _drawStars(ctx, w, h, scrollPx) {
-      const st = this._stars;
+    _drawStars(ctx, w, h, scrollPx, st, k) {
+      st = st || this._stars;
+      k = isNum(k) ? k : 1;
       const n = Math.floor((st.length / 4) * this._q.stars);
       const off = scrollPx * 0.004;
       const t = this.time;
       ctx.fillStyle = '#ffffff';
       for (let i = 0; i < n; i++) {
-        const k = i * 4;
-        let x = (st[k] * w - off) % w;
+        const j = i * 4;
+        let x = (st[j] * w - off) % w;
         if (x < 0) x += w;
-        const y = st[k + 1] * h;
-        const sz = st[k + 2];
-        ctx.globalAlpha = clamp(0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * (1.3 + sz) + st[k + 3])), 0, 1) * (this.dark ? 1 : 0.6);
+        const y = st[j + 1] * h;
+        const sz = st[j + 2];
+        ctx.globalAlpha = clamp(0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * (1.3 + sz) + st[j + 3])), 0, 1) * (this.dark || st !== this._stars ? 1 : 0.6) * k;
         ctx.fillRect(x, y, sz, sz);
       }
       ctx.globalAlpha = 1;
     }
 
-    _drawCelestial(ctx, w, h) {
+    _drawCelestial(ctx, w, h, alpha) {
       const kind = (this.world && this.world.celestial) || 'sun';
       // render at the device pixel scale of the current transform so the disc stays crisp at DPR 2
       let k = 1;
-      try { const tr = ctx.getTransform ? ctx.getTransform() : null; if (tr) k = clamp(Math.hypot(tr.a, tr.b), 1, 3); } catch (e) { k = 1; }
+      try { const tr = ctx.getTransform ? ctx.getTransform() : null; if (tr) k = clamp(Math.hypot(tr.a, tr.b), 0.5, 3); } catch (e) { k = 1; }
       k = Math.round(k * 4) / 4;
       const key = kind + '|' + h + '|' + k;
       if (this._celestialKey !== key) {
@@ -422,7 +566,12 @@
       if (!spr) return;
       const pos = CELESTIAL_POS[kind] || CELESTIAL_POS.sun;
       const x = pos[0] * w, y = pos[1] * h;   // at infinity: no parallax
-      ctx.drawImage(spr.canvas, x - spr.cx / k, y - spr.cy / k, spr.canvas.width / k, spr.canvas.height / k);
+      const a = isNum(alpha) ? clamp(alpha, 0, 1) : 1;
+      if (a <= 0.005) return;
+      ctx.globalAlpha = a;
+      // snapped to whole device pixels → a 1:1 blit (a sub-pixel offset forces a filtered draw)
+      ctx.drawImage(spr.canvas, Math.round((x - spr.cx / k) * k) / k, Math.round((y - spr.cy / k) * k) / k, spr.canvas.width / k, spr.canvas.height / k);
+      ctx.globalAlpha = 1;
     }
 
     _drawShootingStar(ctx, s) {
@@ -450,7 +599,8 @@
     }
 
     // band 0: all clouds (normal) or the high storm deck; band 1: low churning storm deck
-    _drawClouds(ctx, w, h, scrollPx, band) {
+    _drawClouds(ctx, w, h, scrollPx, band, alphaK) {
+      const ak = isNum(alphaK) ? alphaK : 1;
       const cl = this._clouds;
       if (!cl.length) return;
       const sprites = this._ensureCloudSprites(h);
@@ -469,15 +619,15 @@
         // churning: storm clouds breathe in scale and alpha
         const churn = this.cfg.storm ? 1 + 0.06 * Math.sin(this.time * 0.7 + c.phase) : 1;
         const y = c.y * h + (band ? h * 0.12 : 0);
-        ctx.globalAlpha = this.cfg.cloudAlpha * (this.cfg.storm ? 0.75 + 0.2 * Math.sin(this.time * 0.5 + c.phase) : 1);
+        ctx.globalAlpha = ak * this.cfg.cloudAlpha * (this.cfg.storm ? 0.75 + 0.2 * Math.sin(this.time * 0.5 + c.phase) : 1);
         ctx.drawImage(sp, x, y, cw * churn, chh * churn);
       }
       ctx.globalAlpha = 1;
     }
 
     // ================================================================ silhouette layers
-    _drawLayer(ctx, li, L, w, h, s, scroll, baseY) {
-      if (L.kind === 'skyline') { this._drawSkyline(ctx, li, L, w, h, s, scroll, baseY); return; }
+    _drawLayer(ctx, li, L, w, h, s, scroll, baseY, bottom) {
+      if (L.kind === 'skyline') { this._drawSkyline(ctx, li, L, w, h, s, scroll, baseY, bottom); return; }
       const step = this._q.step;
       const n = Math.ceil(w / step) + 2;
       if (this._cols.length < n) this._cols = new Float32Array(n + 16);
@@ -495,8 +645,8 @@
         const v = clamp(gen(noise, u, seed), 0, 1.2);
         cols[i] = baseY - v * amp;
       }
-      // fill silhouette
-      const floor = isNum(this._floor) ? this._floor : h;
+      // fill silhouette (down to `bottom`: the next layer covers everything below its baseline)
+      const floor = isNum(bottom) ? bottom : (isNum(this._floor) ? this._floor : h);
       ctx.fillStyle = this.layerColors[li];
       ctx.beginPath();
       ctx.moveTo(-step, floor);
@@ -516,9 +666,18 @@
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
-      if (L.snow) this._drawSnowCaps(ctx, L, cols, n, step, baseY, amp, scroll);
+      const mw = U.safeNum(this.moonW, 0);
+      if (L.snow) {
+        if (mw > 0) ctx.globalAlpha = 1 - 0.6 * mw;
+        this._drawSnowCaps(ctx, L, cols, n, step, baseY, amp, scroll);
+        ctx.globalAlpha = 1;
+      }
       if (L.strata) this._drawStrata(ctx, li, cols, n, step, baseY, amp);
-      if (L.trees) this._drawTrees(ctx, li, L, cols, step, w, s, scroll, scale);
+      if (L.trees && mw < 0.99) {
+        if (mw > 0) ctx.globalAlpha = 1 - mw;                 // no forests inside THE MOON
+        this._drawTrees(ctx, li, L, cols, step, w, s, scroll, scale);
+        ctx.globalAlpha = 1;
+      }
       if (tipCollect) this._volcanoTips(ctx, li, L, w, h, s, scroll, scale, baseY, amp, seed, noise);
       if (L.kind === 'spires' && L.glow) this._spireTips(ctx, L, w, s, scroll, scale, baseY, amp, seed, noise);
       if (L.embers) this._layerEmbers(ctx, cols, n, step, s, scroll);
@@ -733,13 +892,13 @@
     }
 
     // Blocky skyline with lit windows, rooftop antennas and neon strips.
-    _drawSkyline(ctx, li, L, w, h, s, scroll, baseY) {
+    _drawSkyline(ctx, li, L, w, h, s, scroll, baseY, bottom) {
       const cellW = L.scale * s;
       const amp = L.amp * h;
       const k0 = Math.floor(scroll / cellW) - 1, k1 = Math.ceil((scroll + w) / cellW) + 1;
       const seed = this.seed + li * 131;
       const col = this.layerColors[li];
-      const floor = isNum(this._floor) ? this._floor : h;
+      const floor = isNum(bottom) ? bottom : (isNum(this._floor) ? this._floor : h);
       ctx.fillStyle = col;
       ctx.beginPath();
       ctx.moveTo(-10, floor);
@@ -941,89 +1100,101 @@
       const n = this._wn;
       const X = this._wx, Y = this._wy, S = this._ws, P = this._wp;
       const t = this.time;
-      switch (amb) {
-        case 'pollen':
-          ctx.fillStyle = '#fff1a8';
-          for (let i = 0; i < n; i++) {
-            ctx.globalAlpha = clamp(0.25 + 0.3 * Math.sin(t * 2 + P[i]), 0, 1);
-            const r = (1 + 2 * S[i]) * s;
-            ctx.fillRect(X[i] - r / 2, Y[i] - r / 2, r, r);
-          }
-          break;
-        case 'mist': {
-          const spr = RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite('#e8eef2') : null;
-          if (spr) {
+      // ambient weather (pollen, snow, embers…) thins out inside a MOON section (no air up there)
+      const am = 1 - U.safeNum(this.moonW, 0);
+      if (am > 0.01) {
+        switch (amb) {
+          case 'pollen':
+            ctx.fillStyle = '#fff1a8';
             for (let i = 0; i < n; i++) {
-              ctx.globalAlpha = 0.1 + 0.08 * S[i];
-              const mw = w * (0.35 + 0.35 * S[i]), mh = h * (0.12 + 0.1 * S[i]);
-              ctx.drawImage(spr, X[i] - mw / 2, h * 0.55 + (Y[i] / h) * h * 0.4 - mh / 2, mw, mh);
+              ctx.globalAlpha = clamp(0.25 + 0.3 * Math.sin(t * 2 + P[i]), 0, 1) * am;
+              const r = (1 + 2 * S[i]) * s;
+              ctx.fillRect(X[i] - r / 2, Y[i] - r / 2, r, r);
             }
+            break;
+          case 'mist': {
+            const spr = RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite('#e8eef2') : null;
+            if (spr) {
+              for (let i = 0; i < n; i++) {
+                ctx.globalAlpha = (0.1 + 0.08 * S[i]) * am;
+                const mw = w * (0.35 + 0.35 * S[i]), mh = h * (0.12 + 0.1 * S[i]);
+                ctx.drawImage(spr, X[i] - mw / 2, h * 0.55 + (Y[i] / h) * h * 0.4 - mh / 2, mw, mh);
+              }
+            }
+            break;
           }
-          break;
-        }
-        case 'sand':
-          ctx.strokeStyle = '#f1d49a';
-          ctx.lineWidth = Math.max(1, 1.2 * s);
-          ctx.globalAlpha = 0.45;
-          ctx.beginPath();
-          for (let i = 0; i < n; i++) {
-            const len = (10 + 24 * S[i]) * s;
-            ctx.moveTo(X[i], Y[i]);
-            ctx.lineTo(X[i] - len, Y[i] - len * 0.08);
-          }
-          ctx.stroke();
-          break;
-        case 'snow':
-          ctx.fillStyle = '#ffffff';
-          for (let i = 0; i < n; i++) {
-            const r = (0.8 + 2.4 * S[i]) * s;
-            ctx.globalAlpha = 0.55 + 0.4 * S[i];
+          case 'sand': {
+            // streak direction follows the (signed) sand velocity, so a headwind reverses the blow
+            const vx = 420 + this._windPx() * 60;
+            const dirx = vx >= 0 ? 1 : -1;
+            ctx.strokeStyle = '#f1d49a';
+            ctx.lineWidth = Math.max(1, 1.2 * s);
+            ctx.globalAlpha = 0.45 * am;
             ctx.beginPath();
-            ctx.arc(X[i], Y[i], r, 0, TAU);
-            ctx.fill();
-          }
-          break;
-        case 'embers': {
-          ctx.globalCompositeOperation = 'lighter';
-          const spr = RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite('#ff7a1c') : null;
-          ctx.fillStyle = '#ffb347';
-          for (let i = 0; i < n; i++) {
-            const r = (2 + 4 * S[i]) * s;
-            ctx.globalAlpha = clamp(0.5 + 0.5 * Math.sin(t * 7 + P[i] * 3), 0, 1);
-            if (spr) ctx.drawImage(spr, X[i] - r * 2, Y[i] - r * 2, r * 4, r * 4);
-            else ctx.fillRect(X[i], Y[i], r, r);
-          }
-          ctx.globalCompositeOperation = 'source-over';
-          break;
-        }
-        case 'neon_rain':
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.lineWidth = Math.max(1, 1.3 * s);
-          for (let pass = 0; pass < 2; pass++) {
-            ctx.strokeStyle = pass === 0 ? '#ff4fd8' : '#4ff6ff';
-            ctx.globalAlpha = 0.3;
-            ctx.beginPath();
-            for (let i = pass; i < n; i += 2) {
-              const len = (14 + 20 * S[i]) * s;
+            for (let i = 0; i < n; i++) {
+              const len = (10 + 24 * S[i]) * s;
               ctx.moveTo(X[i], Y[i]);
-              ctx.lineTo(X[i] - len * 0.06, Y[i] - len);
+              ctx.lineTo(X[i] - dirx * len, Y[i] - len * 0.08);
             }
             ctx.stroke();
+            break;
           }
-          ctx.globalCompositeOperation = 'source-over';
-          break;
-        case 'storm_rain':
-          this._drawRain(ctx, 0, n, s, 'rgba(190,210,235,0.34)');
-          break;
-        default: break;
+          case 'snow':
+            ctx.fillStyle = '#ffffff';
+            for (let i = 0; i < n; i++) {
+              const r = (0.8 + 2.4 * S[i]) * s;
+              ctx.globalAlpha = (0.55 + 0.4 * S[i]) * am;
+              ctx.beginPath();
+              ctx.arc(X[i], Y[i], r, 0, TAU);
+              ctx.fill();
+            }
+            break;
+          case 'embers': {
+            ctx.globalCompositeOperation = 'lighter';
+            const spr = RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite('#ff7a1c') : null;
+            ctx.fillStyle = '#ffb347';
+            for (let i = 0; i < n; i++) {
+              const r = (2 + 4 * S[i]) * s;
+              ctx.globalAlpha = clamp(0.5 + 0.5 * Math.sin(t * 7 + P[i] * 3), 0, 1) * am;
+              if (spr) ctx.drawImage(spr, X[i] - r * 2, Y[i] - r * 2, r * 4, r * 4);
+              else ctx.fillRect(X[i], Y[i], r, r);
+            }
+            ctx.globalCompositeOperation = 'source-over';
+            break;
+          }
+          case 'neon_rain':
+            ctx.globalCompositeOperation = 'lighter';
+            ctx.lineWidth = Math.max(1, 1.3 * s);
+            for (let pass = 0; pass < 2; pass++) {
+              ctx.strokeStyle = pass === 0 ? '#ff4fd8' : '#4ff6ff';
+              ctx.globalAlpha = 0.3 * am;
+              ctx.beginPath();
+              for (let i = pass; i < n; i += 2) {
+                const len = (14 + 20 * S[i]) * s;
+                const sl = rainSlant(this._windPx(), 40, 900, S[i]);
+                ctx.moveTo(X[i], Y[i]);
+                ctx.lineTo(X[i] - len * sl, Y[i] - len);
+              }
+              ctx.stroke();
+            }
+            ctx.globalCompositeOperation = 'source-over';
+            break;
+          case 'storm_rain':
+            ctx.globalAlpha = am;
+            this._drawRain(ctx, 0, n, s, 'rgba(190,210,235,0.34)');
+            break;
+          default: break;
+        }
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
       // extra rain from env.rain (any world)
       const total = Math.min(this._wcap, n + Math.round(this._rainN * 200 * this._q.weather));
       if (total > n) this._drawRain(ctx, n, total, s, 'rgba(200,215,240,0.3)');
+      // ambient wind: faint screen-space streaks once the wind is strong (storm sections show it in the rain)
+      this._drawWindStreaks(ctx, w, h, s);
       // ground fog / heat haze
-      const fogAmt = (this.cfg.mist ? 0.6 : 0) + (amb === 'sand' ? 0.5 : 0) + (env && isNum(env.fog) ? clamp(env.fog, 0, 1) : 0);
-      if (fogAmt > 0) {
+      const fogAmt = ((this.cfg.mist ? 0.6 : 0) + (amb === 'sand' ? 0.5 : 0)) * am + (env && isNum(env.fog) ? clamp(env.fog, 0, 1) : 0);
+      if (fogAmt > 0.01) {
         if (!this._fogGrad || this._fogKey !== h) {
           const g = ctx.createLinearGradient(0, h * 0.55, 0, h);
           g.addColorStop(0, rgbaStr(this.pal.fog, 0));
@@ -1045,16 +1216,47 @@
       }
     }
 
+    // Wind streaks: thin white dashes blowing with env.wind (m/s²). Invisible below ~2.5, full at ~10.
+    // Deterministic (hashed lanes × time), so nothing is allocated or stored.
+    _drawWindStreaks(ctx, w, h, s) {
+      const wind = this._windPx();
+      const k = U.smoothstep(2.5, 10, Math.abs(wind)) * (1 - 0.8 * this._rainN) * (1 - U.safeNum(this.moonW, 0));
+      if (k <= 0.02) return;
+      const dir = wind < 0 ? -1 : 1;
+      const lanes = Math.round((this.quality === 'low' ? 10 : 18) * Math.max(0.7, w / 1280));
+      const speed = (500 + 60 * Math.abs(wind)) * s;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1, 1.4 * s);
+      ctx.lineCap = 'round';
+      const span = w + 400 * s;
+      for (let i = 0; i < lanes; i++) {
+        const r1 = cellRand(this.seed, i, 81), r2 = cellRand(this.seed, i, 82), r3 = cellRand(this.seed, i, 83);
+        const len = (60 + 110 * r2) * s * (0.6 + 0.4 * k);
+        let x = (r3 * span + dir * this.time * speed * (0.7 + 0.6 * r1)) % span;
+        if (x < 0) x += span;
+        x -= 200 * s;
+        const y = h * (0.12 + 0.72 * r1) + Math.sin(this.time * 1.7 + i * 2.3) * 10 * s;
+        ctx.globalAlpha = k * (0.1 + 0.16 * r2);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.quadraticCurveTo(x - dir * len * 0.5, y - 3 * s, x - dir * len, y + 2 * s);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineCap = 'butt';
+    }
+
     _drawRain(ctx, a, b, s, color) {
       const X = this._wx, Y = this._wy, S = this._ws;
-      const slant = 0.18 + U.safeNum(this._wind, 0) * 0.03;
+      const wind = this._windPx();
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(1, 1.2 * s);
       ctx.beginPath();
       for (let i = a; i < b; i++) {
         const len = (16 + 22 * S[i]) * s;
+        const sl = rainSlant(wind, 160, 1150, S[i]);   // streak matches the drop's own velocity
         ctx.moveTo(X[i], Y[i]);
-        ctx.lineTo(X[i] - len * slant, Y[i] - len);
+        ctx.lineTo(X[i] - len * sl, Y[i] - len);
       }
       ctx.stroke();
     }

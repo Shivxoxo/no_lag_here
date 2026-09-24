@@ -359,14 +359,20 @@ H.test('Renderer: resize is cheap/idempotent and DPR caps follow quality', () =>
   H.assert(r.dpr === 2 && el.width === 2000 && el.height === 1200, 'high caps dpr at 2 (got ' + r.dpr + ')');
   H.assert(r.resize() === false, 'second resize is a no-op');
   r.setQuality('medium');
-  H.assert(r.dpr === 1.5 && el.width === 1500, 'medium caps dpr at 1.5');
+  H.assert(r.dpr === 1.25 && el.width === 1250 && r.deviceRatio === 1.25, 'medium caps dpr at 1.25 (got ' + r.dpr + ')');
   r.setQuality('low');
-  H.assert(r.dpr === 1 && el.width === 1000, 'low caps dpr at 1');
+  // LOW: device ratio capped at 1, then rendered at 75 % (the browser upscales the canvas)
+  H.assert(r.deviceRatio === 1 && r.renderScale === 0.75 && r.dpr === 0.75 && el.width === 750, 'low renders at 0.75 (got ' + r.dpr + ')');
+  H.assert(r.w === 1000 && r.h === 600, 'CSS size is unchanged by the render scale');
   el.clientWidth = 1200;
-  H.assert(r.resize() === true && r.w === 1200, 'resize picks up a new size');
+  H.assert(r.resize() === true && r.w === 1200 && el.width === 900, 'resize picks up a new size');
   CTX.devicePixelRatio = 1;
   r.setQuality('high');
-  H.assert(r.dpr === 1, 'dpr never above the device ratio');
+  H.assert(r.dpr === 1 && r.renderScale === 1, 'dpr never above the device ratio');
+  r.setQuality('bogus');
+  H.assert(r.quality === 'high' && r.qualitySetting === 'high', 'unknown quality falls back to high');
+  r.setQuality('auto');
+  H.assert(r.quality === 'high' && r.qualitySetting === 'auto', "'auto' renders HIGH until the ladder steps down");
 });
 
 H.test('Renderer: worldTransform / screenTransform follow the contract formula', () => {
@@ -523,6 +529,265 @@ H.test('Renderer: every decoration type used by any world has a dedicated painte
   }
   RR.Renderer.drawDecoration(ctx, { x: NaN, y: undefined, type: 'tree', scale: NaN }, null, NaN, 40);
   assertClean(rec, 'decorations');
+});
+
+// ================================================================ review fixes (visuals-1..5, gameplay-3 cross)
+H.test('Renderer: dynamic resolution steps down when slow, back up when fast, ignores gaps (visuals-3)', () => {
+  const { el } = stubCanvas(1000, 600);
+  CTX.devicePixelRatio = 2;
+  const r = new RR.Renderer(el);
+  const feed = (ms, seconds) => { const n = Math.round(seconds * 1000 / ms); for (let i = 0; i < n; i++) r.reportFrameTime(ms); };
+  H.assert(r.autoQuality === true && r.renderScale === 1 && el.width === 2000, 'starts at full scale');
+  feed(25, 1.5);
+  H.assert(r.renderScale === 1, 'no step before the EMA has been slow for 2 s');
+  feed(25, 1.5);
+  H.assert(r.renderScale === 0.85 && r.dpr === 1.7 && el.width === 1700 && r.w === 1000, 'slow → 0.85 (got ' + r.renderScale + ', ' + el.width + ')');
+  feed(25, 20);
+  // DPR 2 may go below 0.7 but never below 1 backing px per CSS px
+  H.assert(r.renderScale === 0.5 && r.dpr === 1, 'floor on a hi-DPI screen is 1 px/CSS px (got ' + r.renderScale + ')');
+  // long gaps (pause, hidden tab) never count as slow frames
+  for (let i = 0; i < 50; i++) r.reportFrameTime(900);
+  H.assert(r.renderScale === 0.5, 'gaps ignored');
+  feed(10, 4);
+  H.assert(r.renderScale === 0.5, 'needs 5 s of fast frames before stepping up');
+  feed(10, 3);
+  H.assert(r.renderScale === 0.6, 'fast → one step up (got ' + r.renderScale + ')');
+  // an upgrade undone quickly doubles the next wait (no oscillation)
+  feed(25, 3);
+  H.assert(r.renderScale === 0.5, 'slow again → back down');
+  feed(10, 6.5);
+  H.assert(r.renderScale === 0.5, 'backed-off: 5 s is no longer enough');
+  feed(10, 5);
+  H.assert(r.renderScale === 0.6, 'backed-off wait of 10 s steps up');
+  // DPR 1: the fixed-quality floor is 0.7
+  CTX.devicePixelRatio = 1;
+  r.setQuality('high');
+  H.assert(r.renderScale === 0.6, 're-applying the same quality keeps the ladder (settings re-apply on any change)');
+  r.setQuality('medium');
+  r.setQuality('high');
+  H.assert(r.renderScale === 1 && r.dpr === 1, 'a quality change resets the ladder');
+  feed(30, 30);
+  H.assert(r.renderScale === 0.7, 'DPR 1 floor is 0.7 (got ' + r.renderScale + ')');
+  feed(30, 10);
+  H.assert(r.suggestedQuality === 'medium', 'still slow at the floor → suggests MEDIUM');
+  const st = r.frameStats();
+  H.assert(st.scale === 0.7 && st.ema > 25 && st.setting === 'high', 'frameStats snapshot');
+  r.setAutoQuality(false);
+  H.assert(r.renderScale === 1 && el.width === 1000, 'auto off → full scale again');
+  feed(30, 10);
+  H.assert(r.renderScale === 1, 'auto off → never steps');
+});
+
+H.test("Renderer: quality 'auto' walks down through MEDIUM and LOW and syncs the run (visuals-3)", () => {
+  const { el } = stubCanvas(960, 540);
+  CTX.devicePixelRatio = 1;
+  const r = new RR.Renderer(el);
+  const hints = [];
+  r.onQualityHint = (q) => hints.push(q);
+  r.setQuality('auto');
+  for (let i = 0; i < Math.round(40000 / 30); i++) r.reportFrameTime(30);
+  H.assert(r.quality === 'low', 'auto ends on LOW when always slow (got ' + r.quality + ')');
+  H.assert(hints.join(',') === 'medium,low', 'quality hints: ' + hints.join(','));
+  const run = makeRun(RR.Worlds.list[0], VEHICLES[0], {});
+  r.drawRun(run);
+  H.assert(run.background.quality === 'low' && run.particles.quality === 'low', 'auto mode keeps the run background/particles on the ladder quality');
+  for (let i = 0; i < Math.round(80000 / 8); i++) r.reportFrameTime(8);
+  H.assert(r.quality === 'high' && r.renderScale === 1, 'fast again → back to HIGH at full scale (got ' + r.quality + ' ' + r.renderScale + ')');
+});
+
+H.test('Renderer: LOW darkness draws directly (no light-map blit), HIGH keeps the light map (visuals-3)', () => {
+  const world = RR.Worlds.byId('storm_planet');
+  const count = (q) => {
+    const { el, rec } = stubCanvas(1280, 720);
+    const r = new RR.Renderer(el);
+    r.setQuality(q);
+    r.setAutoQuality(false);
+    const run = makeRun(world, VEHICLES[0], { env: { darkness: 0.6 }, noBackground: true, run: { particles: undefined } });
+    rec.ops = Object.create(null);
+    r._drawDarkness(r.ctx, run, run.camera, { dark: '#05060c' }, 0.6);
+    assertClean(rec, 'darkness ' + q);
+    return rec.ops;
+  };
+  const lo = count('low'), hi = count('high');
+  H.assert(!lo.drawImage && lo.fillRect >= 3 && lo.createRadialGradient <= 1, 'LOW: solid rects + one gradient box, no blit');
+  H.assert(hi.drawImage >= 1, 'HIGH: light map blit');
+});
+
+H.test('Background: layers stop at the next baseline, LOW skips the far layer and haze (visuals-3)', () => {
+  const world = RR.Worlds.byId('green_valley');
+  const run = (q) => {
+    const { ctx, rec } = checkingContext(H.createStubElement('canvas'));
+    const bg = new RR.Background(world, 7);
+    bg.setQuality(q);
+    const cam = mockCamera(100, 3, 1280, 720);
+    bg.update(1 / 60, cam, {});
+    const layers = [];
+    const orig = bg._drawLayer;
+    bg._drawLayer = function (c, li, L, w, h, s, scroll, baseY, bottom) { layers.push([li, baseY, bottom]); return orig.apply(this, arguments); };
+    bg.drawSky(ctx, cam, 1280, 720, {});
+    assertClean(rec, 'sky ' + q);
+    return { layers, rec };
+  };
+  const hi = run('high'), lo = run('low');
+  H.assert(hi.layers.length === 4 && lo.layers.length === 3 && lo.layers[0][0] === 1, 'LOW drops the farthest layer');
+  for (let i = 0; i < 3; i++) H.assert(hi.layers[i][2] <= hi.layers[i + 1][1] + 1.01, 'layer ' + i + ' clipped at the next baseline');
+  H.assert((lo.rec.ops.drawImage || 0) < (hi.rec.ops.drawImage || 0), 'LOW blits fewer haze strips');
+});
+
+H.test('Renderer: trimmed terrain draws the virtual wall as a rock cliff to the view edge (visuals-1)', () => {
+  const { el, rec } = stubCanvas(1280, 720);
+  const r = new RR.Renderer(el);
+  const world = RR.Worlds.byId('green_valley');
+  const T = mockTerrain(world);
+  // trimmed at x = 170: stored samples start there; left of it the wall rises at slope 3 (terrain.js _py)
+  const minIdx = 340, g = T.heightAt;
+  T.minX = 170;
+  T.getIndexRange = (x0, x1, out) => { out = out || [0, 0]; out[0] = Math.max(Math.floor(x0 / 0.5), minIdx); out[1] = Math.ceil(x1 / 0.5); return out; };
+  T.pointY = (i) => (i < minIdx ? g(170) + (minIdx - i) * 0.5 * 3 : g(i * 0.5));
+  T.heightAt = (x) => (x < 170 ? g(170) + (170 - x) * 3 : g(x));
+  T.decorations = [];
+  const run = makeRun(world, VEHICLES[0], { terrain: T, x: 172 });
+  r.drawRun(run);
+  assertClean(rec, 'wall');
+  const b = run.camera.bounds({});
+  H.assert(r._nWall > 0, 'wall samples prepended');
+  H.assert(r._xs[0] <= b.left, 'ground now spans to the left view edge (' + r._xs[0].toFixed(1) + ' vs ' + b.left.toFixed(1) + ')');
+  H.assert(Math.abs(r._xs[r._nWall] - 170) < 1e-6, 'a sample lands exactly on minX');
+  for (let j = 0; j < r._nWall; j++) H.assertClose(r._ys[j], T.heightAt(r._xs[j]), 1e-6, 'drawn wall matches the collision wall');
+  // untrimmed view: nothing prepended
+  const run2 = makeRun(world, VEHICLES[0], { x: 40 });
+  r.drawRun(run2);
+  H.assert(r._nWall === 0, 'no wall when the view is inside stored terrain');
+});
+
+H.test('Renderer/VehicleArt: MAGNET rings + coin streaks, 2X COINS gold rim, fading over the last 2 s (visuals-2)', () => {
+  const world = RR.Worlds.byId('green_valley');
+  const draw = (pus, remaining, q) => {
+    const { el, rec } = stubCanvas(1280, 720);
+    const r = new RR.Renderer(el);
+    if (q) { r.setQuality(q); r.setAutoQuality(false); }
+    const run = makeRun(world, VEHICLES[0], { powerUps: pus, noBackground: true });
+    run.powerUps.remaining = () => remaining;
+    const b = run.body;
+    run.collectibles = { draw() {}, _heads: { coins: 0 }, coins: [
+      { x: b.x - 4, y: b.y + 1, state: 1, scale: 1 }, { x: b.x + 3, y: b.y + 2, state: 1, scale: 1 },
+      { x: b.x + 5, y: b.y, state: 0, scale: 1 }, null, { x: b.x + 40, y: b.y, state: 1, scale: 1 }] };
+    const strokes = [];
+    const origArc = r.ctx.arc;
+    rec.ops = Object.create(null);
+    r.drawRun(run);
+    assertClean(rec, 'power-ups ' + pus.join('+'));
+    return { ops: rec.ops, r };
+  };
+  const none = draw([], 5), mag = draw(['magnet'], 5), mult = draw(['multiplier'], 5);
+  H.assert((mag.ops.arc || 0) >= (none.ops.arc || 0) + 3, 'magnet adds field rings');
+  H.assert((mag.ops.closePath || 0) > (none.ops.closePath || 0), 'magnet adds coin streaks');
+  H.assert((mult.ops.stroke || 0) > (none.ops.stroke || 0) && (mult.ops.drawImage || 0) > (none.ops.drawImage || 0), '2X COINS adds a rim stroke and a glow');
+  const r0 = draw(['magnet', 'multiplier'], 0.001);
+  H.assert(r0.r._vopts.magnet < 0.01 && r0.r._vopts.multiplier < 0.01, 'both fade out at the end');
+  const r1 = draw(['magnet', 'multiplier'], 1);
+  H.assertClose(r1.r._vopts.magnet, 0.5, 1e-9, 'half strength 1 s before the end');
+  const low = draw(['multiplier'], 5, 'low');
+  H.assert((low.ops.drawImage || 0) <= (none.ops.drawImage || 0), 'LOW: no soft aura blit');
+  // VehicleArt directly: opts.multiplier draws, bogus values are safe
+  const { ctx, rec } = checkingContext(H.createStubElement('canvas'));
+  for (const veh of VEHICLES) {
+    const tuned = tunedFor(veh.id, veh.style);
+    RR.VehicleArt.draw(ctx, mockBody(tuned, 0, 1, 0.2), tuned, veh.colors, 1.3, { multiplier: 1 });
+    RR.VehicleArt.draw(ctx, mockBody(tuned, 0, 1, 0.2), tuned, veh.colors, 1.3, { multiplier: NaN, quality: 'low' });
+    RR.VehicleArt.draw(ctx, mockBody(tuned, 0, 1, 0.2), tuned, veh.colors, 1.3, { multiplier: true });
+  }
+  assertClean(rec, 'vehicleArt multiplier');
+});
+
+H.test('Background/Renderer: THE MOON section darkens the sky, hides clouds and plant decorations (visuals-4)', () => {
+  const world = RR.Worlds.byId('green_valley');
+  const bg = new RR.Background(world, 3);
+  const cam = mockCamera(50, 2, 1280, 720);
+  const colors0 = bg.layerColors.slice();
+  bg.update(1 / 60, cam, { gravityMul: 1, sectionId: null });
+  H.assert(bg.moonW === 0, 'no blend outside the section');
+  for (let i = 0; i < 20; i++) bg.update(1 / 60, cam, { gravityMul: 0.45, sectionId: 'moon' });
+  H.assert(bg.moonW > 0.2 && bg.moonW < 0.9, 'eases in (not a snap): ' + bg.moonW.toFixed(2));
+  for (let i = 0; i < 120; i++) bg.update(1 / 60, cam, { gravityMul: 0.45, sectionId: 'moon' });
+  H.assert(bg.moonW === 1, 'fully blended inside');
+  H.assert(bg.layerColors[0] !== colors0[0], 'parallax layers tinted toward the moon palette');
+  const { ctx, rec } = checkingContext(H.createStubElement('canvas'));
+  let clouds = 0;
+  const oc = bg._drawClouds;
+  bg._drawClouds = function () { clouds++; return oc.apply(this, arguments); };
+  bg.drawSky(ctx, cam, 1280, 720, {});
+  bg.drawWeather(ctx, cam, 1280, 720, {});
+  assertClean(rec, 'moon sky');
+  H.assert(clouds === 0, 'no clouds inside THE MOON');
+  H.assert((rec.ops.fillRect || 0) > 150, 'stars drawn');
+  for (let i = 0; i < 120; i++) bg.update(1 / 60, cam, { gravityMul: 1, sectionId: null });
+  H.assert(bg.moonW === 0 && bg.layerColors[0] === colors0[0], 'leaving restores the world palette');
+  // moon_base itself never blends (it already is the moon)
+  const mb = new RR.Background(RR.Worlds.byId('moon_base'), 3);
+  for (let i = 0; i < 120; i++) mb.update(1 / 60, cam, { gravityMul: 0.6, sectionId: 'moon' });
+  H.assert(mb.moonW === 0, 'moon_base unaffected');
+  // renderer hides trees / flowers / fences while blended
+  const { el } = stubCanvas(1280, 720);
+  const r = new RR.Renderer(el);
+  const run = makeRun(world, VEHICLES[0], { x: 12, env: { gravityMul: 0.45, sectionId: 'moon' } });
+  const painted = [];
+  const T = run.terrain;
+  T.decorations = [{ x: 10, y: T.heightAt(10), type: 'tree', scale: 1, layer: 'back', variant: 0 },
+    { x: 14, y: T.heightAt(14), type: 'rock', scale: 1, layer: 'back', variant: 0 }];
+  for (let i = 0; i < 150; i++) run.background.update(1 / 60, run.camera, run.env);
+  const fills = () => { const { el: e2, rec: rc } = stubCanvas(1280, 720); const r2 = new RR.Renderer(e2); r2.drawRun(run); return rc.ops.fill || 0; };
+  const inMoon = fills();
+  for (let i = 0; i < 150; i++) run.background.update(1 / 60, run.camera, { gravityMul: 1, sectionId: null });
+  const outMoon = fills();
+  H.assert(inMoon < outMoon, 'plant decorations skipped inside THE MOON (' + inMoon + ' vs ' + outMoon + ' fills)');
+});
+
+H.test('Renderer: Neon billboard has four distinct neon motifs, not a placeholder glyph (visuals-5)', () => {
+  const world = RR.Worlds.byId('neon_city');
+  const sig = [];
+  for (let v = 0; v < 4; v++) {
+    const { ctx, rec } = checkingContext(H.createStubElement('canvas'));
+    RR.Renderer.drawDecoration(ctx, { x: 5, y: 1, type: 'billboard', scale: 1, variant: v }, world, 2.2, 40);
+    assertClean(rec, 'billboard ' + v);
+    H.assert((rec.ops.stroke || 0) >= 1 && (rec.ops.strokeRect || 0) >= 1, 'stroked neon frame + motif');
+    H.assert(!rec.ops.arc || v === 1, 'no placeholder circle glyph');
+    sig.push(JSON.stringify(rec.ops));
+  }
+  H.assert(new Set(sig).size === 4, 'every variant draws a different motif');
+});
+
+H.test('Background: rain slant and wind streaks follow env.wind (gameplay-3 cross)', () => {
+  const world = RR.Worlds.byId('green_valley');
+  const slantOf = (wind) => {
+    const bg = new RR.Background(world, 11);
+    const cam = mockCamera(0, 0, 1280, 720);
+    const env = { wind, rain: 1 };
+    bg.update(1 / 60, cam, env);
+    bg.drawWeather(H.createStubContext2D(H.createStubElement('canvas')), cam, 1280, 720, env);
+    const moves = [];
+    const c = H.createStubContext2D(H.createStubElement('canvas'));
+    let last = null;
+    c.moveTo = (x, y) => { last = [x, y]; };
+    c.lineTo = (x, y) => { if (last) moves.push((last[0] - x) / (last[1] - y)); last = null; };
+    bg._drawRain(c, 0, 50, 1, '#fff');
+    return moves.reduce((a, v) => a + v, 0) / moves.length;
+  };
+  const calm = slantOf(0), head = slantOf(-10), tail = slantOf(10);
+  H.assert(tail > calm + 0.3 && head < calm - 0.3, 'slant tracks wind: head ' + head.toFixed(2) + ' calm ' + calm.toFixed(2) + ' tail ' + tail.toFixed(2));
+  H.assert(head < 0, 'a strong headwind tilts the rain the other way');
+  // streaks: none in calm air, some in a gale, direction follows the sign
+  const streaks = (wind) => {
+    const bg = new RR.Background(world, 11);
+    const cam = mockCamera(0, 0, 1280, 720);
+    bg.update(0.5, cam, { wind });
+    const { ctx, rec } = checkingContext(H.createStubElement('canvas'));
+    bg._drawWindStreaks(ctx, 1280, 720, 1);
+    assertClean(rec, 'streaks');
+    return rec.ops.quadraticCurveTo || 0;
+  };
+  H.assert(streaks(1) === 0 && streaks(-1.5) === 0, 'no streaks in light air');
+  H.assert(streaks(8) >= 10 && streaks(-8) >= 10, 'streaks in strong wind (both directions)');
 });
 
 H.done();

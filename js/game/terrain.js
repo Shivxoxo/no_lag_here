@@ -15,7 +15,8 @@
  *     against the *actual* committed heights (ballistic check) and rolled back if they fail.
  *  3. FINALIZE — the heightfield is published in 64 m chunks: alt-surface patches, cave ceilings and
  *     decorations are added, features are published and onChunk() fires.
- *  4. SCHEDULE — major sections and boss climbs come from a deterministic plan (see _planNextMajor).
+ *  4. SCHEDULE — major sections and boss climbs come from a deterministic plan (see _planNextMajor);
+ *     short wall climbs on normal ground come from their own deterministic schedule (see _planWalls).
  *
  * Contract notes / additions (callers may ignore all of these):
  *  - closestPoint(): exactly as specified — out.nx/ny points from the surface point TOWARD p, so when
@@ -24,11 +25,24 @@
  *    When nothing is within maxDist it returns false and only sets out.dist = Infinity, out.inside.
  *  - Feature.meta for 'jump' | 'gap' | 'lava' also carries takeoffY, landingY, apexX, rampX, rampHeight,
  *    landingZoneX2; gap/lava add depth, floorY, trenchX, trenchX2, vReq (required launch speed, m/s);
- *    lava adds poolX, poolX2, poolY. 'steep' meta: {maxSlope, dir (+1 up / −1 down), rise}.
+ *    lava adds poolX, poolX2, poolY. 'steep' meta: {maxSlope, dir (+1 up / −1 down), rise}; a wall climb's
+ *    'steep' feature (x = foot of its ramp, x2 = top of its round-over) adds {wall: true, faceX, faceX2}.
  *    'plateau' meta: {length, ledge?, summit?, tier?}. 'valley' meta: {bottomX, bottomY, depth}.
  *    'rocks' meta: {bumpHeight, length}. 'bouncepad'/'boostpad' meta: {power, length}.
- *    'summit'/'checkpoint' meta: {tier, bossName}.
- *  - Extra methods: maxSlopeAt(x), upcomingSection(x), jumpCheck(feature), flagsIdx(i), surfaceInfoIdx(i).
+ *    'summit'/'checkpoint' meta: {tier, bossName}. The boss's kicker gap (tier ≥ 2) is a 'gap' with
+ *    meta.boss = true (shallow 1–2.5 m trench, vReq ≤ 10.5 m/s, exit ≤ 0.6 so a car that falls in drives out).
+ *  - Boss SectionInfo (sections / sectionAt / upcomingSection, already on the teaser) also carries
+ *    ledges: [{x, x2}] — the flat rest ledges of the climb, sorted (3 on tier 1; 4 from tier 2, where the
+ *    2nd is the gap's run-up and the 3rd its landing ledge). Each is also published as a 'plateau'
+ *    feature with meta.ledge. Boss slopes may reach 1.25 × low-gravity factor (validate() knows).
+ *  - Extra methods: maxSlopeAt(x) (uphill limit, incl. the late-distance ×1.3 budget past D),
+ *    maxDownSlopeAt(x), upcomingSection(x), jumpCheck(feature), flagsIdx(i), surfaceInfoIdx(i).
+ *  - requestFeature('steep', xMin) → the next wall climb whose ramp starts in [xMin, xMin + 280] (published
+ *    or still pending; ground is generated through it on demand) or null. Content-neutral: calling it
+ *    never changes the course. Used by the EventSystem's 'steep_surprise'.
+ *  - FLAGS.WALL marks wall-climb samples (own slope cap, exempt from the organic slope follower).
+ *  - The first major section is the world's signature set piece where one exists (storm_planet → storm,
+ *    volcanic_ridge → volcano, moon_base → moon, or world.signatureSection), at 1200–1600 m.
  *  - Instance getter t.DX (same as the static). Statics: RR.Terrain.DX, RR.Terrain.FLAGS,
  *    RR.Terrain.SURFACE_TYPES (index → surface key), RR.Terrain.SURFACE_LIST (index → frozen
  *    SurfaceInfo), RR.Terrain.V_LIMIT (16 m/s cap on any gap/lava required launch speed).
@@ -67,11 +81,24 @@
   const LAVA_WALL = -1.4;
   const BOSS_FIRST = 3000;
   const BOSS_EVERY = 5000;
-  const BOSS_PEAK_CAP = 0.8;
+  // Boss climbs (see _bossPlan): a base grade with short steep steps, a rock garden, a long headwall (the
+  // crux: sustained steepness is what separates stock from upgraded cars — short pitches are carried by
+  // momentum), a false flat and a final wall. Walls/steps are capped at BOSS_WALL_CAP (× surface factor).
+  const BOSS_WALL_CAP = 1.25;
   const BOSS_SLOPE_TOL = 0.06;
-  const BOSS_SLOPE_MAX = BOSS_PEAK_CAP + BOSS_SLOPE_TOL;
+  const BOSS_SLOPE_MAX = BOSS_WALL_CAP + BOSS_SLOPE_TOL;
+  const BOSS_GAP_V = 10.5;                    // boss gap (tier ≥ 2) required launch speed cap (m/s)
+  const REF_FRICTION = 1.05;                  // rock: slope numbers are authored for this friction
+  // Short 'wall' climbs on normal ground (terrain-2): planned on their own schedule (see _planWalls).
+  const WALL_CAP = 1.25;                      // max wall face slope (rise/run)
+  const WALL_TOL = 0.04;
+  const WALL_REQ_RANGE = 280;                 // requestFeature('steep', x) looks this far past x
+  const LATE_MUL = 1.3;                       // late-distance slope budget multiplier (D → 2.5·D)
+  const LATE_CAP = 1.25;
   const CONCAVE_RELAX = 0.12;                 // max concave turn per vertex (rad) on organic ground
   const CAVE_MIN_CLEAR = 9;
+  // First major section of a run on worlds with a signature set piece (placed at 1.2–1.6 km).
+  const SIGNATURE = Object.freeze({ storm_planet: 'storm', volcanic_ridge: 'volcano', moon_base: 'moon' });
 
   // Per-sample flags (Uint16).
   const F_DESIGN = 1;   // designed ramp / lip / wall — exempt from the normal slope limit
@@ -83,9 +110,10 @@
   const F_LAVA = 64;    // lava pool surface
   const F_RAMP = 128;   // kicker ramp
   const F_ROCKS = 256;  // rock garden bumps (intentionally tight curvature, R ≥ ~1.2 m)
+  const F_WALL = 512;   // short steep 'wall' climb on normal ground (own slope limit, WALL_CAP)
   const FLAGS = Object.freeze({
     DESIGN: F_DESIGN, TRENCH: F_TRENCH, BOSS: F_BOSS, LOCK: F_LOCK, NODECO: F_NODECO,
-    PAD: F_PAD, LAVA: F_LAVA, RAMP: F_RAMP, ROCKS: F_ROCKS
+    PAD: F_PAD, LAVA: F_LAVA, RAMP: F_RAMP, ROCKS: F_ROCKS, WALL: F_WALL
   });
 
   // Surface index tables (Uint8 per sample).
@@ -274,7 +302,14 @@
       this._lavaSurf = surfIndex('lava', this._rockSurf);
       this._neonSurf = surfIndex('neon', this._surfDefault);
       this._bossSurf = defFric >= 0.88 ? this._surfDefault : this._rockSurf;
-      this._bossFricF = Math.min(1, SURFACE_LIST[this._bossSurf].friction / 0.95);
+      // climbing ability scales ~ friction^0.8 (measured: crystal 0.88 → ×0.90 of rock's max slope)
+      this._bossFricF = Math.min(1, Math.pow(SURFACE_LIST[this._bossSurf].friction / REF_FRICTION, 0.8));
+      this._wallSurf = this._bossSurf;
+      this._wallFricF = this._bossFricF;
+      // low gravity makes steep ground easier (measured on Moon Base, g 0.42: +8…17 % max slope; +10 % used)
+      this._gravF = 1 + 0.18 * Math.max(0, 1 - this._g / G0);
+      this._bossSlopeMax = BOSS_WALL_CAP * this._gravF + BOSS_SLOPE_TOL;
+      this._wallSlopeMax = WALL_CAP * this._gravF + WALL_TOL;
 
       // --- decorations
       const decos = Array.isArray(world.decorations) && world.decorations.length ? world.decorations.slice() : ['rock'];
@@ -285,6 +320,9 @@
       // --- sections
       const pool = (Array.isArray(world.sectionPool) ? world.sectionPool : []).filter((id) => SECTION_IDS.indexOf(id) >= 0);
       this._pool = pool.length ? pool : ['canyon', 'storm'];
+      // signature set piece (first major section): world.signatureSection, else the built-in mapping
+      const sig = typeof world.signatureSection === 'string' ? world.signatureSection : SIGNATURE[world.id];
+      this._signature = sig && this._pool.indexOf(sig) >= 0 ? sig : null;
 
       // --- RNG streams (independent so each subsystem stays deterministic on its own)
       const root = U.makeRng(U.hash2(this.seed, U.hashString(String(world.id || 'world'))));
@@ -293,6 +331,7 @@
       this._rs = root.fork('sections');
       this._rsu = root.fork('surface');
       this._rd = root.fork('decorations');
+      this._rw = root.fork('walls');
       this._nA = U.makeNoise1D(root.fork('detailA').seed);
       this._nB = U.makeNoise1D(root.fork('detailB').seed);
       this._nCave = U.makeNoise1D(root.fork('cave').seed);
@@ -331,6 +370,8 @@
       this._forceNext = null;
       this._lastBossRise = 0;
       this._bossLim = BOSS_SLOPE_MAX;
+      this._walls = [];        // planned wall climbs, sorted (see _planWalls)
+      this._wallPrev = null;   // x of the last planned wall (null before the first)
       this._plans = [];
       this._majorPrev = null;
       this._lastSectionId = null;
@@ -371,10 +412,29 @@
       return clamp(x / this._dd, 0, 1);
     }
 
-    // Normal-ground slope limit (rise/run) at x: grows with difficulty up to world.terrain.maxSlope.
+    // Normal-ground slope limit (rise/run) at x: grows with difficulty up to world.terrain.maxSlope, then
+    // (late-distance budget, UPHILL only) × lerp(1, 1.3, smoothstep(D, 2.5·D, x)), capped at 1.25 — see
+    // _slopeLimit. Downhill stays at the base limit (maxDownSlopeAt) so late valleys never turn into
+    // 50° V-trenches that slam a fast car into the opposite wall.
     maxSlopeAt(x) {
-      const ms = this._maxS;
-      return lerp(Math.min(0.5, ms), ms, Math.min(1, this.difficultyAt(x) + this._slopeBoost));
+      if (!isNum(x)) x = 0;
+      return this._slopeLimit(x, Math.min(1, this.difficultyAt(x) + this._slopeBoost));
+    }
+    maxDownSlopeAt(x) {
+      if (!isNum(x)) x = 0;
+      const ms = this._maxS, lo = Math.min(0.5, ms);
+      return lo + (ms - lo) * Math.min(1, this.difficultyAt(x) + this._slopeBoost);
+    }
+
+    _slopeLimit(x, dq) {
+      const ms = this._maxS, dd = this._dd;
+      let lim = Math.min(0.5, ms) + (ms - Math.min(0.5, ms)) * dq;
+      if (x > dd) {
+        const u = x >= 2.5 * dd ? 1 : (x - dd) / (1.5 * dd);
+        const m = 1 + (LATE_MUL - 1) * u * u * (3 - 2 * u);
+        lim = Math.min(lim * m, Math.max(lim, LATE_CAP));
+      }
+      return lim;
     }
 
     ensure(xMax) {
@@ -592,7 +652,7 @@
           } else rampRun = 0;
         } else {
           rampRun = 0;
-          const L = (fl & F_BOSS) ? BOSS_SLOPE_MAX : lim;
+          const L = (fl & F_BOSS) ? this._bossSlopeMax : (fl & F_WALL) ? this._wallSlopeMax : s < 0 ? this.maxDownSlopeAt(x) : lim;
           if (Math.abs(s) > L + 0.02) add('slope ' + s.toFixed(3) + ' > ' + L.toFixed(3) + ' at x=' + x);
         }
         // Concave kinks: turning angle between the 1 m chords either side of the vertex.
@@ -602,7 +662,7 @@
           const turn = a2 - a1;
           if (turn > 0) {
             let special = false;
-            for (let j = -2; j <= 2; j++) if (f[k + j] & (F_DESIGN | F_ROCKS)) special = true;
+            for (let j = -2; j <= 2; j++) if (f[k + j] & (F_DESIGN | F_ROCKS | F_WALL)) special = true;
             if (turn > 1.0 / 0.45) add('concave kink tighter than a wheel at x=' + x);
             else if (!special && turn > 0.45) add('sharp concave kink (' + turn.toFixed(2) + ' rad) at x=' + x);
           }
@@ -853,8 +913,8 @@
       const Lb = len >= 4 ? Math.min(10, 0.3 * len) : 0;
       let prev = h[c0 - base];
       let ds = this._ds;
-      // slope limit = lerp(lo, maxS, clamp(x / dd)) inlined (hot loop)
-      const ms = this._maxS, lo = Math.min(0.5, ms), invDD = 1 / this._dd;
+      // slope limit = lerp(lo, maxS, clamp(x / dd)) inlined (hot loop); the late multiplier past D via _slopeLimit
+      const ms = this._maxS, lo = Math.min(0.5, ms), invDD = 1 / this._dd, dd = this._dd;
       for (let j = 1; j <= n; j++) {
         const gi = c0 + j;
         const x = gi * DX;
@@ -865,14 +925,15 @@
         ds = ds < tgt ? Math.min(tgt, ds + 0.1) : Math.max(tgt, ds - 0.1);
         if (ds > 0) y += ds * this._detail(x);
         const fl = SF[j];
-        if (!(fl & F_DESIGN)) {
+        if (!(fl & (F_DESIGN | F_WALL))) {
           // slope-limited follower: keeps organic ground within the difficulty's slope limit
-          const dq = Math.min(1, (x <= 0 ? 0 : x >= this._dd ? 1 : x * invDD) + this._slopeBoost);
-          let lim = lo + (ms - lo) * dq;
-          if ((fl & F_BOSS) && this._bossLim > lim) lim = this._bossLim;
-          lim *= DX;
+          const dq = Math.min(1, (x <= 0 ? 0 : x >= dd ? 1 : x * invDD) + this._slopeBoost);
+          let limDn = lo + (ms - lo) * dq;
+          let lim = x > dd ? this._slopeLimit(x, dq) : limDn;
+          if ((fl & F_BOSS) && this._bossLim > lim) { lim = this._bossLim; limDn = lim; }
+          lim *= DX; limDn *= DX;
           if (y > prev + lim) y = prev + lim;
-          else if (y < prev - lim) y = prev - lim;
+          else if (y < prev - limDn) y = prev - limDn;
         }
         if (y !== y) y = prev;
         const kk = gi - base;
@@ -881,7 +942,8 @@
       }
       this._wEnd = w0 + n;
       this._ds = ds;
-      this._relaxConcave(w0, this._wEnd);
+      // include the join vertex (the previous pattern's last samples are never published yet: LOOKAHEAD)
+      this._relaxConcave(Math.max(w0 - 2, this._fEnd + 2, this._minIdx + 1), this._wEnd);
       this._cy = y0 + SY[n];
       this._cs = tt.s;
       return c0;
@@ -891,7 +953,7 @@
     // slopes toward each other, so it can never push a segment past the slope limit.
     _relaxConcave(a, b) {
       const h = this._h, f = this._f, base = this._base;
-      for (let pass = 0; pass < 8; pass++) {
+      for (let pass = 0; pass < 24; pass++) {
         let changed = false;
         for (let i = a; i < b - 1; i++) {
           const k = i - base;
@@ -926,7 +988,7 @@
       for (let i = Math.max(a, this._minIdx + 1); i < b; i++) {
         const k = i - base;
         const s = (h[k] - h[k - 1]) / DX;
-        const dir = (f[k] & F_DESIGN) ? 0 : s > thr ? 1 : s < -thr ? -1 : 0;
+        const dir = (f[k] & (F_DESIGN | F_WALL)) ? 0 : s > thr ? 1 : s < -thr ? -1 : 0;   // walls publish their own
         if (dir !== runDir) { flush(i - 1); if (dir !== 0) { runStart = i - 1; runDir = dir; } }
         if (dir !== 0 && Math.abs(s) > runMax) runMax = Math.abs(s);
       }
@@ -938,7 +1000,7 @@
         const last = this._pend.length ? this._pend[this._pend.length - 1] : null;
         for (const ft of pf) {
           if (last && ft.type === 'steep' && last.type === 'steep' && last.meta.dir === ft.meta.dir &&
-            Math.abs(last.x2 - ft.x) <= DX + 1e-9 && ft === pf[0]) {
+            !ft.meta.wall && !last.meta.wall && Math.abs(last.x2 - ft.x) <= DX + 1e-9 && ft === pf[0]) {
             last.x2 = ft.x2;
             last.meta.maxSlope = Math.max(last.meta.maxSlope, ft.meta.maxSlope);
             last.meta.rise += ft.meta.rise;
@@ -953,46 +1015,165 @@
     // ---------------------------------------------------------------- section schedule
     _tierAt(x) { return Math.max(1, Math.floor((x - BOSS_FIRST) / BOSS_EVERY) + 1); }
 
+    // Boss plan (deterministic per tier, own RNG fork). Built from sample-exact ops, so summitX and the rest
+    // ledges are known before the climb is generated (section.ledges = [{x, x2}], sorted). Layout:
+    //   P1 warm-up: 0.4 → base grade, one short steep step (6–10 m) → rest ledge
+    //   P2 base grade, rock garden (0.3–0.5 m bumps), steep step(s) → rest ledge
+    //      (tier ≥ 2: that ledge is the run-up for a small kicker gap onto a landing ledge)
+    //   P3 the crux: ≥ 15 m of base grade (so the ledge's momentum is spent), then a 40–60 m headwall
+    //   P4 false flat (≈ 0.2), base grade, final wall → flat summit plateau
+    // Slopes grow per tier (steps/walls +0.04–0.05, capped at BOSS_WALL_CAP) and are scaled by the boss
+    // surface's friction factor. Measured (real physics, rolling bot): the headwall stops most stock cars on
+    // tier 1 while engine+grip 5 and the Rock Crawler get up; later tiers need more upgrades.
     _bossPlan(tier) {
       let p = this._bossMemo.get(tier);
       if (p) return p;
       const r = this._root.fork('boss' + tier);
       const start = snapX(BOSS_FIRST + BOSS_EVERY * (tier - 1));
-      const peak = Math.min(BOSS_PEAK_CAP, 0.74 + 0.03 * tier) * this._bossFricF;
-      const climbLen = clamp(250 + 45 * (tier - 1) + r.range(0, 70), 250, 450);
-      const nL = r.int(3, 5);
-      const ledges = [];
-      let ledgeSum = 0;
-      for (let k = 0; k < nL; k++) { const n = Math.round(r.range(9, 14) / DX); ledges.push(n); ledgeSum += n * DX; }
-      const segCount = nL + 1;
-      const climbTotal = climbLen - ledgeSum;
-      const raw = [];
-      let rawSum = 0;
-      for (let k = 0; k < segCount; k++) { const v = r.range(0.8, 1.2); raw.push(v); rawSum += v; }
-      const segs = [];
-      let total = 0;
-      for (let k = 0; k < segCount; k++) {
-        const pr = (k + 1) / segCount;
-        const s = lerp(0.4, peak, Math.pow(pr, 0.8));       // slope rises toward the peak near the top
-        const segN = Math.round(climbTotal * raw[k] / rawSum / DX);
-        const nT = Math.max(2, Math.ceil(s / 0.07));         // concave entry: ≤ 0.07 slope change / sample
-        const nE = Math.max(4, Math.ceil(s / 0.1));          // convex round-over into the ledge
-        const nH = Math.max(10, segN - nT - nE);
-        segs.push({ s, nT, nH, nE });
-        total += nT + nH + nE + (k < nL ? ledges[k] : 0);
+      // authored for rock at 1 g; × surface factor (ability ~ friction^0.8) × low-gravity factor
+      const fF = this._bossFricF * this._gravF, t1 = tier - 1;
+      const cap = (v) => Math.min(BOSS_WALL_CAP, v) * fF;
+      // Tier 1 (measured with the review's boss autopilot, full fuel): stock cars clear ≈ 60 % (Rock Crawler
+      // 100 %, Trail Buggy / Mountain Truck ≈ 15–25 %), engine+grip 5 ≈ 98 %. The headwall levels off at
+      // 1.19 × 62 m from tier 4, which every maxed car can sustain (≈ 1.3 over 60 m) but stock cars cannot.
+      const gBase = cap(Math.min(0.88, 0.72 + 0.025 * t1 + r.range(-0.02, 0.03)));
+      const gStep = cap(Math.min(1.15, 1.0 + 0.04 * t1 + r.range(0, 0.06)));
+      const gHead = cap(Math.min(1.19, 1.10 + 0.03 * t1 + r.range(-0.03, 0.05)));
+      const gFinal = cap(Math.min(1.16, 1.05 + 0.03 * t1 + r.range(-0.02, 0.05)));
+      const gRock = Math.min(0.45, gBase - 0.2);
+      // long enough that a car arriving at speed stalls before the top unless it can sustain the grade
+      const lHead = Math.min(62, 52 + 2 * t1 + r.range(0, 8));
+      const lFinal = Math.min(40, 28 + 3 * t1 + r.range(0, 6));
+      const ops = [], ledges = [];
+      let j = 0, cs = 0, maxS = 0, gap = null;
+      const add = (op) => { ops.push(op); j += op.n; if (op.s !== undefined) { cs = op.s; maxS = Math.max(maxS, op.s); } };
+      const hold = (len, st) => { const n = Math.round(len / DX); if (n >= 1) add({ k: 'hold', st, n }); };
+      // slope change at ≤ 0.07/sample (concave) or ≤ 0.1/sample (convex round-over)
+      const toSlope = (sT, st) => {
+        const d = sT - cs;
+        if (Math.abs(d) < 1e-9) return;
+        add({ k: 'ramp', st, s: sT, n: Math.max(2, Math.ceil(Math.abs(d) / (d > 0 ? 0.07 : 0.1) - 1e-9)) });
+      };
+      const ledge = (len, st) => {
+        toSlope(0, 'flat');
+        const a = j;
+        hold(len, st || 'flat');
+        ledges.push({ x: start + a * DX, x2: start + j * DX });
+      };
+      const step = () => {
+        toSlope(gStep, 'wall'); hold(r.range(6, 10), 'wall');
+        toSlope(gBase, 'grade'); hold(r.range(6, 10), 'grade');
+      };
+      // P1 warm-up
+      toSlope(0.4, 'grade'); hold(r.range(8, 12), 'grade');
+      toSlope(gBase, 'grade'); hold(r.range(10, 16), 'grade');
+      step();
+      ledge(r.range(15, 22));
+      // P2 rock garden + step(s)
+      toSlope(gBase, 'grade'); hold(r.range(8, 12), 'grade');
+      toSlope(gRock, 'grade');
+      const rgLen = r.range(16, 24), bumps = [];
+      let rgN = 0;
+      while (rgN * DX < rgLen) {
+        const w = r.range(3, 4.5), h = r.range(0.3, 0.45);
+        // curvature 2π²h/w² ≤ 1/1.2 m and local slope trend + πh/w ≤ base grade + 0.1
+        const hb = Math.min(h, w * w / 23.7, Math.max(0.05, (gBase + 0.1 - gRock) * w / PI));
+        const k = Math.max(4, Math.round(w / DX));
+        bumps.push(k, hb); rgN += k;
       }
+      add({ k: 'bumps', st: 'rocks', n: rgN, trend: gRock, bumps });
+      toSlope(gBase, 'grade'); hold(r.range(6, 10), 'grade');
+      step();
+      if (tier >= 3) step();
+      if (tier >= 2) {
+        // small kicker gap onto a landing ledge: run-up ledge → kicker → trench (exit ≤ TRENCH_EXIT, so a car
+        // that falls in drives out onto the landing ledge) → landing ledge. Relaxed until vReq ≤ BOSS_GAP_V.
+        // gentle kicker + long landing ledge: a fast car (≈ 22 m/s) must not overshoot into the next grade
+        const ru = r.range(20, 24), landLen = r.range(26, 32);
+        let D = r.range(1.5, 1.9), fw = r.range(1.0, 1.5), drop = r.range(0.35, 0.55);
+        const sl = 0.34, nK = Math.round(4 / DX);
+        toSlope(0, 'flat');
+        for (let it = 0; it < 12; it++) {
+          const g = this._bossGapOps(ru, sl, nK, D, fw, drop);
+          if (g.vReq <= BOSS_GAP_V || it === 11) {
+            const j0 = j;
+            gap = { rampJ: j0 + g.rampJ, lipJ: j0 + g.lipJ, floorJ0: j0 + g.floorJ0, floorJ1: j0 + g.floorJ1, crestJ: j0 + g.crestJ, vPlan: g.vReq };
+            for (const op of g.ops) add(op);
+            ledges.push({ x: start + j0 * DX, x2: start + (j0 + g.lipJ - nK) * DX });
+            ledge(landLen, 'land');
+            gap.landJ = j;
+            break;
+          }
+          if (fw > 0.6) fw = Math.max(0.5, fw - 0.4); else if (D > 1.2) D -= 0.2; else drop = Math.min(1.2, drop + 0.2);
+        }
+      } else {
+        ledge(r.range(16, 22));
+      }
+      // P3 crux: base grade eats the ledge momentum, then the headwall
+      toSlope(gBase, 'grade'); hold(r.range(15, 20), 'grade');
+      toSlope(gHead, 'wall'); hold(lHead, 'wall');
+      ledge(r.range(15, 22));
+      // P4 false flat → final wall → summit plateau
+      toSlope(0.2, 'grade'); hold(r.range(14, 20), 'grade');
+      toSlope(gBase, 'grade'); hold(r.range(10, 14), 'grade');
+      toSlope(gFinal, 'wall'); hold(lFinal, 'wall');
+      toSlope(0, 'flat');
       const nP = Math.round(r.range(45, 60) / DX);
-      total += nP;
-      const end = start + total * DX;
-      const plateauStart = end - nP * DX;
+      const pj = j;
+      add({ k: 'hold', st: 'flat', n: nP });
+      const end = start + j * DX;
+      const plateauStart = start + pj * DX;
       const summitX = plateauStart + 10;
       const info = {
         id: 'boss', name: sectionName('boss'), bossName: this.world.bossName || 'THE MOUNTAIN GIANT',
-        start, end, summitX, tier
+        start, end, summitX, tier, ledges
       };
-      p = { kind: 'boss', id: 'boss', tier, start, end, peak, segs, ledges, nP, summitX, info };
+      p = { kind: 'boss', id: 'boss', tier, start, end, maxSlope: maxS, gBase, gHead, gFinal, lHead, lFinal,
+        ops, pj, nP, gap, summitX, info };
       this._bossMemo.set(tier, p);
       return p;
+    }
+
+    // Sample-exact ops of the boss gap (starting on flat ground) plus its required launch speed, computed on
+    // a local copy of the profile with the same turtle arithmetic the builder uses.
+    _bossGapOps(ru, sl, nK, D, fw, drop) {
+      const ops = [];
+      const nR = Math.round(ru / DX);
+      ops.push({ k: 'hold', st: 'flat', n: nR });
+      ops.push({ k: 'ramp', st: 'kick', s: sl, n: nK });
+      const yLip = 0.5 * sl * nK * DX;
+      const yRim = yLip - drop, yFloor = yRim - D;
+      const SW = NEAR_WALL, kF = 2;
+      const nW = Math.max(1, Math.round((yLip - yFloor + 0.5 * kF * DX * SW) / (-SW * DX)));
+      ops.push({ k: 'set', st: 'trench', s: SW, n: 0 });
+      ops.push({ k: 'hold', st: 'trench', n: nW });
+      ops.push({ k: 'ramp', st: 'trench', s: 0, n: kF });
+      const nF = Math.max(1, Math.round(fw / DX));
+      ops.push({ k: 'hold', st: 'trench', n: nF });
+      const yF = yLip + nW * DX * SW + 0.5 * kF * DX * SW;
+      const nX = Math.max(0, Math.round((yRim - yF - 2 * 0.5 * 4 * DX * TRENCH_EXIT) / (TRENCH_EXIT * DX)));
+      ops.push({ k: 'ramp', st: 'trench', s: TRENCH_EXIT, n: 4 });
+      if (nX) ops.push({ k: 'hold', st: 'trench', n: nX });
+      ops.push({ k: 'ramp', st: 'trench', s: 0, n: 4 });
+      // replay the profile
+      let n = 0;
+      for (const op of ops) n += op.n;
+      const ys = new Float64Array(n + 1);
+      let y = 0, sc = 0, q = 0;
+      for (const op of ops) {
+        if (op.k === 'set') { sc = op.s; continue; }
+        const s0 = sc, sT = op.k === 'ramp' ? op.s : sc;
+        for (let i = 1; i <= op.n; i++) {
+          const sn = s0 + (sT - s0) * i / op.n;
+          y += DX * (sc + sn) * 0.5; sc = sn;
+          ys[++q] = y;
+        }
+      }
+      const rampJ = nR, lipJ = nR + nK, floorJ0 = lipJ + nW + kF, floorJ1 = floorJ0 + nF, crestJ = n;
+      const getY = (x) => { const f = x / DX, i = Math.floor(f); if (i < 0) return ys[0]; if (i >= n) return ys[n]; return ys[i] + (ys[i + 1] - ys[i]) * (f - i); };
+      const theta = Math.atan((ys[lipJ] - ys[lipJ - 1]) / DX);
+      const vReq = ys[crestJ] <= ys[lipJ] + 1e-9 ? this._requiredSpeed(getY, lipJ * DX, ys[lipJ], theta, crestJ * DX + 1.5) : Infinity;
+      return { ops, vReq, rampJ, lipJ, floorJ0, floorJ1, crestJ };
     }
 
     _planAhead(x) {
@@ -1001,13 +1182,18 @@
     }
 
     // Majors: first at 1200–1800 m, then every 2000–3000 m, 350–600 m long, no immediate repeats.
+    // Worlds with a signature set piece (Storm Planet → THE STORM, Volcanic Ridge → THE VOLCANO, Moon Base →
+    // THE MOON, or world.signatureSection) always open with it, at 1200–1600 m; later majors stay random.
     // Bosses (3000 m, then every 5000 m) have priority: a clashing major is pushed past the boss.
     _planNextMajor() {
       const r = this._rs;
-      let s = this._majorPrev === null ? r.range(1200, 1800) : this._majorPrev + r.range(2000, 3000);
+      const first = this._majorPrev === null;
+      const sig = first ? this._signature : null;
+      let s = first ? r.range(1200, sig ? 1600 : 1800) : this._majorPrev + r.range(2000, 3000);
       const len = r.range(350, 600);
       const choices = this._pool.length > 1 ? this._pool.filter((id) => id !== this._lastSectionId) : this._pool;
-      const id = choices[Math.min(choices.length - 1, Math.floor(r.next() * choices.length))];
+      const pick = r.next();   // always drawn, so the stream stays aligned
+      const id = sig || choices[Math.min(choices.length - 1, Math.floor(pick * choices.length))];
       s = snapX(s);
       let e = snapX(s + len);
       for (let tier = Math.max(1, this._tierAt(s) - 1); tier < 100000; tier++) {
@@ -1044,9 +1230,123 @@
       if (this._active) { this._sectionStep(cx); return; }
       this._planAhead(cx);
       const next = this._plans[0];
-      const room = next.start - cx;
+      let room = next.start - cx;
       if (room <= DX * 0.5) { this._enterSection(this._plans.shift()); return; }
+      const w = this._nextWall(cx);
+      if (w && w.x - cx < room) {
+        room = w.x - cx;
+        if (room <= DX * 0.5) { this._walls.shift(); this._wall(w); return; }
+      }
       this._normalStep(cx, room);
+    }
+
+    // ---------------------------------------------------------------- wall climbs (normal ground)
+    // Short steep walls on their own deterministic schedule (RNG stream 'walls'), so their positions are
+    // known before the ground is generated (requestFeature) and every ensure/trim pattern gives the same
+    // course. First wall at max(1500, D/4) + 0–500 m, then every lerp(1100, 450, difficulty) × 0.75–1.3 m,
+    // never within 60 m before / 80 m after a major section or 250 m after a boss. Shape: a 52–62 m run-up
+    // (slope ≤ 0.2 after the first few metres of join blend), a concave ramp, an 8–15 m face at
+    // maxSlope × (0.95 + 0.25·difficulty) × late multiplier (±4 %, cap WALL_CAP, × surface/gravity factor),
+    // a round-over and a 10–18 m flat top. Stock cars need their momentum; upgraded cars can crawl it.
+    _nextWall(cx) {
+      this._planWalls(cx + 1500);
+      const ws = this._walls;
+      while (ws.length && ws[0].x < cx - DX * 0.5) ws.shift();   // defensive: rooms always land on w.x
+      return ws.length ? ws[0] : null;
+    }
+
+    _planWalls(upto) {
+      const r = this._rw;
+      let guard = 0;
+      while ((this._wallPrev === null || this._wallPrev < upto) && guard++ < 64) {
+        const first = this._wallPrev === null;
+        const base = first ? clamp(0.25 * this._dd, 1500, 1800) : this._wallPrev;
+        const dPrev = first ? 0 : this.difficultyAt(this._wallPrev);
+        // fixed number of draws per wall keeps the stream aligned
+        const gapR = r.range(0.75, 1.3), firstR = r.range(0, 500), ru = r.range(52, 62), face = r.range(8, 15);
+        const top = r.range(10, 18), jit = r.range(0.96, 1.04);
+        let x = snapX(first ? base + firstR : base + lerp(1100, 450, dPrev) * gapR);
+        const nRu = Math.round(ru / DX), nFace = Math.round(face / DX), nTop = Math.round(top / DX);
+        const d = this.difficultyAt(x);
+        let sw = this._maxS * (0.95 + 0.25 * d) * jit;
+        if (x > this._dd) sw *= this._slopeLimit(x, 1) / this._maxS;
+        sw = Math.min(WALL_CAP, sw) * this._wallFricF * this._gravF;
+        const nUp = Math.max(2, Math.ceil(sw / 0.1 - 1e-9)), nDn = Math.max(2, Math.ceil(sw / 0.12 - 1e-9));
+        const n = nRu + nUp + nFace + nDn + nTop;
+        // keep clear of sections (re-checked after every push; the section plans are deterministic)
+        for (let pass = 0; pass < 8; pass++) {
+          this._planAhead(x + n * DX + 400);
+          let moved = false;
+          const clash = (a, b, boss) => {
+            const after = boss ? 250 : 80;
+            if (x < b + after && x + n * DX > a - 60) { x = snapX(b + after); moved = true; }
+          };
+          if (this._active) clash(this._active.start, this._active.end, this._active.kind === 'boss');
+          for (const pl of this._plans) clash(pl.start, pl.end, pl.kind === 'boss');
+          if (!moved) break;
+        }
+        this._wallPrev = x;
+        this._walls.push({ x, n, nRu, nUp, nFace, nDn, nTop, slope: sw, end: x + n * DX });
+      }
+    }
+
+    _wall(w) {
+      const ws = this._wallSurf;
+      tReset();
+      tStyle(F_LOCK, KEEP, 0.3);
+      tHold((w.nRu - 12) * DX);
+      tStyle(F_LOCK, KEEP, 0);                 // detail fades out before the ramp
+      tHold(12 * DX);
+      const j0 = tt.n;
+      tStyle(F_WALL | F_LOCK | F_NODECO, ws, 0);
+      tSlope(w.slope, w.nUp * DX);
+      const jf = tt.n;
+      tHold(w.nFace * DX);
+      const jf2 = tt.n;
+      tSlope(0, w.nDn * DX);
+      const j1 = tt.n;
+      tStyle(F_LOCK, KEEP, 0);
+      tHold(w.nTop * DX);
+      const c0 = this._commit();
+      if (c0 < 0) return false;
+      const y0 = this._hAt(c0 + j0), y1 = this._hAt(c0 + j1);
+      this._feat('steep', (c0 + j0) * DX, (c0 + j1) * DX, y0, {
+        maxSlope: w.slope, dir: 1, rise: y1 - y0, wall: true, faceX: (c0 + jf) * DX, faceX2: (c0 + jf2) * DX
+      });
+      this._lastType = 'wall';
+      this._finishPattern();
+      return true;
+    }
+
+    // Optional hook for the EventSystem's 'steep_surprise' (see header): the next wall climb whose ramp
+    // starts in [xMin, xMin + WALL_REQ_RANGE], generating ahead to it if needed. Content-neutral: walls are
+    // planned on their own schedule, so this never changes the course — it only writes (not publishes)
+    // terrain earlier than ensure() would. Returns the published-or-pending 'steep' feature, or null.
+    requestFeature(type, xMin) {
+      if (type !== 'steep' || !isNum(xMin)) return null;
+      const hi = xMin + WALL_REQ_RANGE;
+      const find = (list) => {
+        for (let i = 0; i < list.length; i++) {
+          const f = list[i];
+          if (f.x > hi) break;
+          if (f.type === 'steep' && f.meta && f.meta.wall && f.x >= xMin) return f;
+        }
+        return null;
+      };
+      let f = find(this.features) || find(this._pend);
+      if (f || this._wEnd * DX > hi) return f;   // all of the range is written: the lists are complete
+      this._planWalls(hi);
+      let w = null;
+      for (const c of this._walls) { if (c.x > hi) break; if (c.x + c.nRu * DX >= xMin) { w = c; break; } }
+      if (!w) return null;
+      try {
+        let guard = 0;
+        while (this._wEnd * DX < w.end + DX && guard++ < 400) this._generateNext();
+      } catch (e) {
+        return null;
+      }
+      f = find(this._pend) || find(this.features);
+      return f;
     }
 
     // ---------------------------------------------------------------- normal ground
@@ -1670,37 +1970,64 @@
       return true;
     }
 
-    // Boss climb: slope rises toward the peak, flat rest ledges between pitches, flat summit plateau.
+    // Boss climb: executes the plan's sample-exact ops (see _bossPlan), then publishes the rest ledges,
+    // the gap (tier ≥ 2), the summit plateau, summit and checkpoint.
     _boss(plan) {
       const bs = this._bossSurf;
-      this._bossLim = plan.peak + BOSS_SLOPE_TOL;
+      const ST = {
+        grade: [F_BOSS | F_LOCK, bs, 0.2],
+        wall: [F_BOSS | F_LOCK, bs, 0.1],
+        flat: [F_BOSS | F_LOCK, bs, 0],
+        land: [F_BOSS | F_LOCK | F_NODECO, bs, 0],
+        rocks: [F_BOSS | F_LOCK | F_ROCKS | F_NODECO, this._rockSurf, 0],
+        kick: [F_BOSS | F_DESIGN | F_RAMP | F_LOCK | F_NODECO, bs, 0],
+        trench: [F_BOSS | F_DESIGN | F_TRENCH | F_LOCK | F_NODECO, this._trenchSurf, 0]
+      };
+      this._bossLim = plan.maxSlope + BOSS_SLOPE_TOL;
       tReset();
-      const ledgeJ = [];
-      for (let k = 0; k < plan.segs.length; k++) {
-        const sg = plan.segs[k];
-        tStyle(F_BOSS | F_LOCK, bs, 0.25);
-        tSlope(sg.s, sg.nT * DX);
-        tHold(sg.nH * DX);
-        tStyle(F_BOSS | F_LOCK, bs, 0);   // detail fades out over the round-over so ledges are truly flat
-        tSlope(0, sg.nE * DX);
-        if (k < plan.ledges.length) {
-          tStyle(F_BOSS | F_LOCK, bs, 0);
-          const a = tt.n;
-          tHold(plan.ledges[k] * DX);
-          ledgeJ.push([a, tt.n]);
+      for (const op of plan.ops) {
+        const st = ST[op.st] || ST.grade;
+        tStyle(st[0], st[1], st[2]);
+        if (op.k === 'ramp') tSlope(op.s, op.n * DX);
+        else if (op.k === 'hold') tHold(op.n * DX);
+        else if (op.k === 'set') tt.s = op.s;
+        else if (op.k === 'bumps') {
+          let yb = tt.y;
+          const B = op.bumps;
+          for (let q = 0; q < B.length; q += 2) {
+            const k = B[q], hb = B[q + 1];
+            for (let i = 1; i <= k; i++) {
+              yb += op.trend * DX;
+              tt.y = yb + hb * 0.5 * (1 - Math.cos(2 * PI * i / k));
+              tPush(tt.y);
+            }
+          }
+          tt.y = yb; tt.s = op.trend;
         }
       }
-      tStyle(F_BOSS | F_LOCK, bs, 0);
-      const pj = tt.n;
-      tHold(plan.nP * DX);
       if (tt.full) return false;
       const c0 = this._commit();
       if (c0 < 0) return false;
       const tier = plan.tier, bossName = plan.info.bossName;
-      for (const [a, b] of ledgeJ) {
-        this._feat('plateau', (c0 + a) * DX, (c0 + b) * DX, this._hAt(c0 + a), { length: (b - a) * DX, ledge: true, tier });
+      const gp = plan.gap;
+      for (const L of plan.info.ledges) {
+        this._feat('plateau', L.x, L.x2, this.heightAt(L.x), { length: L.x2 - L.x, ledge: true, tier });
       }
-      const px = (c0 + pj) * DX, py = this._hAt(c0 + pj), pEnd = (c0 + tt.n) * DX;
+      if (gp) {
+        const meta = this._launchMeta(c0, gp.rampJ, gp.lipJ);
+        const crestX = (c0 + gp.crestJ) * DX;
+        const floorY = this._hAt(c0 + gp.floorJ0);
+        meta.width = crestX - meta.takeoffX;
+        meta.depth = this._hAt(c0 + gp.crestJ) - floorY;
+        meta.floorY = floorY;
+        meta.trenchX = meta.takeoffX;
+        meta.trenchX2 = crestX;
+        meta.vReq = this._requiredSpeed(this._heightFn, meta.takeoffX, meta.takeoffY, meta.takeoffAngle, crestX + 1.5);
+        meta.landingZoneX2 = (c0 + gp.landJ) * DX;
+        meta.boss = true;
+        this._feat('gap', meta.rampX, meta.landingZoneX2, meta.takeoffY, meta);
+      }
+      const px = (c0 + plan.pj) * DX, py = this._hAt(c0 + plan.pj), pEnd = (c0 + tt.n) * DX;
       this._feat('plateau', px, pEnd, py, { length: pEnd - px, summit: true, tier });
       this._feat('summit', plan.summitX, pEnd, this.heightAt(plan.summitX), { tier, bossName });
       this._feat('checkpoint', plan.summitX, plan.summitX, this.heightAt(plan.summitX), { tier, bossName });

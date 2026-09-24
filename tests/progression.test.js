@@ -32,11 +32,26 @@ const VEHICLE_MOCK = `
 const PRE = ['js/core/utils.js', 'js/core/save.js'];
 const POST = ['js/data/worlds.js', 'js/data/missions.js', 'js/systems/progression.js', 'js/systems/missions.js', 'js/systems/daily.js'];
 
-// Fresh sandbox. opts.store: initial localStorage contents; opts.setup(ctx): tweak before scripts load.
+// A controllable clock for the sandbox: `new Date()` / `Date.now()` read `now`; everything else
+// (constructing specific dates, instanceof) behaves like the real Date.
+function makeClock(start) {
+  let now = start instanceof Date ? start.getTime() : +start;
+  const FakeDate = new Proxy(Date, {
+    construct(T, args) { return args.length ? new T(...args) : new T(now); },
+    apply() { return new Date(now).toString(); },
+    get(T, k) { return k === 'now' ? () => now : T[k]; }
+  });
+  return { Date: FakeDate, set(t) { now = t instanceof Date ? t.getTime() : +t; }, get: () => now };
+}
+
+// Fresh sandbox. opts.store: initial localStorage contents; opts.setup(ctx): tweak before scripts load;
+// opts.clock: a Date (or makeClock()) the sandbox's clock starts at (RR.__clock.set() moves it).
 function fresh(opts) {
   opts = opts || {};
   const ctx = H.createContext();
   if (opts.store) for (const k of Object.keys(opts.store)) ctx.localStorage.setItem(k, opts.store[k]);
+  const clock = opts.clock ? (opts.clock.set ? opts.clock : makeClock(opts.clock)) : null;
+  if (clock) ctx.Date = clock.Date;
   if (opts.setup) opts.setup(ctx);
   H.load(PRE, ctx);
   if (HAS_VEHICLES) H.load(['js/data/vehicles.js'], ctx);
@@ -44,6 +59,7 @@ function fresh(opts) {
   H.load(POST, ctx);
   const RR = ctx.RR;
   RR.__ctx = ctx;
+  RR.__clock = clock;
   if (opts.load !== false) RR.Save.load();
   return RR;
 }
@@ -163,7 +179,7 @@ H.test('xp on disk decides the level; hand-edited level ignored; level paints gr
 });
 
 H.test('save → load round trip preserves everything', () => {
-  const A = fresh();
+  const A = fresh({ clock: date('2026-03-10') });
   const P = A.Progression;
   P.addCoins(60000); P.addTokens(5); setLevel(A, 8);
   P.unlockVehicle('dirt_runner', 'tokens');
@@ -184,15 +200,25 @@ H.test('save → load round trip preserves everything', () => {
   H.assert(B.Save.data.missions.active.length === 3 && B.Save.data.daily.attempts === 1, 'missions/daily kept');
 });
 
-H.test('localStorage unavailable → silent in-memory mode', () => {
-  const RR = fresh({ setup: (ctx) => Object.defineProperty(ctx, 'localStorage', { get() { throw new Error('SecurityError'); } }) });
-  H.assert(RR.Save.persistent === false, 'memory mode');
+H.test('localStorage unavailable → in-memory mode, one deferred saveError {unavailable}', () => {
+  const timers = [];
+  const RR = fresh({ setup: (ctx) => {
+    Object.defineProperty(ctx, 'localStorage', { get() { throw new Error('SecurityError'); } });
+    ctx.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+  } });
+  H.assert(RR.Save.persistent === false && RR.Save.lastError === 'unavailable', 'memory mode');
+  const errs = events(RR, ['saveError']);
+  H.assert(errs.length === 0 && timers.length >= 1, 'deferred until the UI subscribed');
+  timers.splice(0).forEach((fn) => fn());
+  H.assert(errs.length === 1 && errs[0].p.reason === 'unavailable', 'announced ' + JSON.stringify(errs));
   H.assert(RR.Save.data.coins === 0, 'defaults');
   RR.Progression.addCoins(100);
   H.assert(RR.Save.save() === true, 'save into memory');
   RR.Save.data.coins = 0;
   RR.Save.load();
+  timers.splice(0).forEach((fn) => fn());
   H.assert(RR.Save.data.coins === 100, 'memory store survives a reload in-session');
+  H.assert(errs.length === 1, 'announced once per session');
   // Storage present but every call throws (quota / disabled).
   const thrower = { getItem() { throw new Error('x'); }, setItem() { throw new Error('quota'); }, removeItem() { throw new Error('x'); } };
   const RR2 = fresh({ setup: (ctx) => { ctx.localStorage = thrower; } });
@@ -201,6 +227,40 @@ H.test('localStorage unavailable → silent in-memory mode', () => {
   H.assert(RR2.Save.data.coins === 5, 'keeps working');
   RR2.Save.reset();
   H.assert(RR2.Save.data.coins === 0, 'reset works');
+});
+
+H.test('write failure (quota) → backup dropped + retried; then memory, persistent=false, one saveError; recovers', () => {
+  const RR = fresh();
+  const ls = RR.__ctx.localStorage;
+  const errs = events(RR, ['saveError']);
+  RR.Progression.addCoins(10);
+  H.assert(stored(RR, BAK) && RR.Save.persistent, 'backup exists');
+  // 1) Only room for one copy: the backup is sacrificed and the primary write succeeds.
+  const realSet = ls.setItem.bind(ls);
+  let failOnce = true;
+  ls.setItem = (k, v) => { if (k === KEY && failOnce) { failOnce = false; const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; } realSet(k, v); };
+  ls.removeItem = ((orig) => (k) => orig.call(ls, k))(ls.removeItem);
+  RR.Progression.addCoins(5);
+  H.assert(JSON.parse(stored(RR, KEY)).coins === 15 && RR.Save.persistent && errs.length === 0, 'retry after dropping the backup');
+  // 2) Storage completely full: memory keeps the session going, one event, save() → false.
+  ls.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  RR.Progression.addCoins(100);
+  H.assert(RR.Save.data.coins === 115 && JSON.parse(stored(RR, KEY)).coins === 15, 'kept in memory only');
+  H.assert(RR.Save.persistent === false && RR.Save.lastError === 'quota', 'flags');
+  H.assert(errs.length === 1 && errs[0].p.reason === 'quota', 'one saveError ' + JSON.stringify(errs));
+  H.assert(RR.Save.save() === false, 'save reports failure');
+  RR.Progression.addCoins(1);
+  H.assert(errs.length === 1, 'not repeated');
+  // 3) Space freed: the next write persists again.
+  ls.setItem = realSet;
+  H.assert(RR.Save.save() === true && RR.Save.persistent === true && RR.Save.lastError === null, 'recovered');
+  H.assert(JSON.parse(stored(RR, KEY)).coins === 116 && JSON.parse(stored(RR, BAK)).coins === 116, 'persisted again');
+  // A blocked (non-quota) failure reports 'blocked'.
+  const B = fresh();
+  const be = events(B, ['saveError']);
+  B.__ctx.localStorage.setItem = () => { throw new Error('SecurityError'); };
+  B.Progression.addCoins(1);
+  H.assert(be.length === 1 && be[0].p.reason === 'blocked' && B.Save.lastError === 'blocked', 'blocked');
 });
 
 H.test('reset → defaults, saved, emits saveReset, keeps object identity', () => {
@@ -232,17 +292,27 @@ H.test('save() heals bad values written by other modules; ensureVehicle', () => 
 
 console.log('\nProgression');
 
-H.test('XP curve matches the contract; levelInfo', () => {
+H.test('XP curve (pacing pass: 150·l^1.55); levelInfo; save.js fallback agrees', () => {
   const RR = fresh();
   const P = RR.Progression;
   H.assert(P.MAX_LEVEL === 50, 'max level');
-  for (let l = 1; l < 50; l++) H.assert(P.xpForLevel(l) === Math.round(200 * Math.pow(l, 1.4) / 10) * 10, 'xpForLevel ' + l);
-  H.assert(P.xpForLevel(1) === 200 && P.xpForLevel(2) === 530, 'anchors');
+  for (let l = 1; l < 50; l++) H.assert(P.xpForLevel(l) === Math.round(150 * Math.pow(l, 1.55) / 10) * 10, 'xpForLevel ' + l);
+  H.assert(P.xpForLevel(1) === 150 && P.xpForLevel(1) <= 200 && P.xpForLevel(2) === 440, 'anchors');
   let info = P.levelInfo(0);
-  H.assert(info.level === 1 && info.xpInto === 0 && info.xpNext === 200 && info.progress === 0, 'lv1');
+  H.assert(info.level === 1 && info.xpInto === 0 && info.xpNext === 150 && info.progress === 0, 'lv1');
   info = P.levelInfo(300);
-  H.assert(info.level === 2 && info.xpInto === 100 && info.xpNext === 530, 'lv2 ' + JSON.stringify(info));
-  H.assertClose(info.progress, 100 / 530, 1e-9);
+  H.assert(info.level === 2 && info.xpInto === 150 && info.xpNext === 440, 'lv2 ' + JSON.stringify(info));
+  H.assertClose(info.progress, 150 / 440, 1e-9);
+  // save.js derives the level before RR.Progression exists (load order): same curve.
+  for (const xp of [0, 149, 150, 589, 590, 36829, 36830, 400000, 2e6]) {
+    const S = fresh({ store: { [KEY]: JSON.stringify({ xp }) } });
+    H.assert(S.Save.data.level === P.levelInfo(xp).level, 'save level for xp ' + xp);
+  }
+  const ctx = H.createContext();
+  const bare = H.load(['js/core/utils.js', 'js/core/save.js'], ctx);
+  for (const xp of [0, 150, 590, 36830, 400000]) {
+    H.assert(bare.Save.sanitize({ xp }).level === P.levelInfo(xp).level, 'fallback curve for xp ' + xp);
+  }
   info = P.levelInfo(1e9);
   H.assert(info.level === 50 && info.progress === 1 && info.isMax, 'max');
   info = P.levelInfo(NaN);
@@ -389,7 +459,7 @@ H.test('cosmetics: ≥ 10 paints, unlock on level-up, getPaint/selectPaint', () 
   H.assert(C.length >= 11 && C[0].id === 'paint_factory' && C[0].colors === null && C[0].level === 1, 'catalogue');
   const ids = new Set();
   for (const c of C.slice(1)) {
-    H.assert(c.level >= 2 && c.level <= 30 && typeof c.name === 'string', 'paint ' + c.id);
+    H.assert(c.level >= 2 && c.level <= 40 && typeof c.name === 'string', 'paint ' + c.id);
     for (const k of ['body', 'accent', 'trim', 'wheel', 'rim']) H.assert(/^#[0-9a-f]{6}$/i.test(c.colors[k]), c.id + '.' + k);
     ids.add(c.id);
   }
@@ -418,35 +488,73 @@ H.test('computeRunRewards / applyRunResults: xp rules, bests, stats, record flag
   };
   const r = P.computeRunRewards(summary);
   H.assert(r.coins === 480 && r.bonusCoins === 270 && r.totalCoins === 750 && r.tokens === 1, 'coins');
-  H.assert(r.xp.distance === 123 && r.xp.coins === 30 && r.xp.tricks === 90 && r.xp.boss === 400 && r.xp.record === 250, 'xp ' + JSON.stringify(r.xp));
-  H.assert(r.xp.total === 123 + 30 + 90 + 400 + 250, 'total');
+  // distance/10, PICKUP coins/25 (bonus coins are trick coins), 50 % trick XP; first run on a world: no record XP.
+  H.assert(r.xp.distance === 123 && r.xp.coins === 19 && r.xp.tricks === 45 && r.xp.boss === 400 && r.xp.record === 0, 'xp ' + JSON.stringify(r.xp));
+  H.assert(r.xp.total === 123 + 19 + 45 + 400, 'total');
   H.assert(r.newRecord && r.newWorldRecord && r.previousBest === 0, 'records');
+  H.assert(r.dailyBestPrev === 0 && r.newDailyBest === false, 'no daily fields for normal runs');
   H.assert(RR.Save.data.coins === 0, 'compute is pure');
 
   const res = P.applyRunResults(summary);
   const d = RR.Save.data;
-  H.assert(d.coins === 750 && d.tokens === 1 && d.xp === r.xp.total, 'granted');
+  const chest = res.levelUp.rewards.filter((x) => x.type === 'coins').reduce((a, x) => a + x.amount, 0);
+  H.assert(d.coins === 750 + chest && d.tokens === 1 && d.xp === r.xp.total, 'granted');
   H.assert(res.levelUp && res.levelUp.level === d.level && res.levelUp.levelsGained === d.level - 1, 'levelUp');
   H.assert(d.bestDistances.green_valley === 1234 && d.bestDistance === 1234, 'bests');
   const s = d.stats;
   H.assert(s.runs === 1 && s.totalDistance === 1234.7 && s.coinsCollected === 480 && s.backflips === 3 && s.frontflips === 2 &&
     s.doubleFlips === 2 && s.perfectLandings === 4 && s.fuelCollected === 6 && s.powerups === 3 && s.crashes === 1 &&
     s.bossesCleared === 1 && s.maxCombo === 6 && s.longestAir === 7.5 && s.playTime === 95.5, 'stats ' + JSON.stringify(s));
-  H.assert(JSON.parse(stored(RR, KEY)).coins === 750, 'saved');
+  H.assert(JSON.parse(stored(RR, KEY)).coins === d.coins, 'saved');
 
   // Shorter run: no records, crashes unchanged for fuel end, maxima kept.
   const r2 = P.applyRunResults(Object.assign({}, summary, { distance: 500, endReason: 'fuel', maxCombo: 2, airTime: 1, bossCleared: false, tokens: 0, bossXp: 0 }));
   H.assert(!r2.newRecord && !r2.newWorldRecord && r2.previousBest === 1234 && r2.xp.record === 0, 'no record');
   H.assert(s.crashes === 1 && s.runs === 2 && s.maxCombo === 6 && s.longestAir === 7.5 && s.bossesCleared === 1, 'maxima');
-  // New world best elsewhere, lower than overall best.
-  const r3 = P.applyRunResults(Object.assign({}, summary, { distance: 150, worldId: 'moon_base', mode: 'daily' }));
-  H.assert(r3.newWorldRecord && !r3.newRecord && r3.xp.record === 250 && d.bestDistances.moon_base === 150 && d.bestDistance === 1234, 'world record (daily counts)');
+  // Record XP = min(250, 0.5 × metres beyond the previous best).
+  const r2b = P.computeRunRewards(Object.assign({}, summary, { distance: 1300 }));
+  H.assert(r2b.newWorldRecord && r2b.xp.record === 33, 'small improvement ' + r2b.xp.record);
+  const r2c = P.computeRunRewards(Object.assign({}, summary, { distance: 3000 }));
+  H.assert(r2c.xp.record === 250, 'capped at 250');
+  // Trick XP is capped at 1.5 × distance XP (flip farming on a short run).
+  const r2d = P.computeRunRewards(Object.assign({}, summary, { distance: 200, trickXp: 5000 }));
+  H.assert(r2d.xp.tricks === 30, 'trick cap ' + r2d.xp.tricks);
+  // New world best elsewhere (normal run), lower than overall best — first run on the world pays no record XP.
+  const r3 = P.applyRunResults(Object.assign({}, summary, { distance: 150, worldId: 'moon_base' }));
+  H.assert(r3.newWorldRecord && !r3.newRecord && r3.xp.record === 0 && d.bestDistances.moon_base === 150 && d.bestDistance === 1234, 'world record');
+  const r3b = P.computeRunRewards(Object.assign({}, summary, { distance: 400, worldId: 'moon_base' }));
+  H.assert(r3b.xp.record === 125, 'record over a ≥ 50 m best ' + r3b.xp.record);
   // World record below 100 m → flag but no bonus xp.
   const r4 = P.applyRunResults(Object.assign({}, summary, { distance: 60, worldId: 'desert_canyon' }));
   H.assert(r4.newWorldRecord && r4.xp.record === 0, 'short world record');
   // Garbage summary numbers never produce NaN.
   const r5 = P.applyRunResults({ worldId: 'green_valley', mode: 'normal', distance: NaN, coins: 'x', bonusCoins: -9, tricks: null });
   H.assert(r5.totalCoins === 0 && r5.xp.total === 0 && Number.isFinite(d.stats.totalDistance) && Number.isFinite(d.coins), 'garbage safe');
+});
+
+H.test('daily runs never write permanent bests or pay record XP (even on a locked world)', () => {
+  const RR = fresh();
+  const P = RR.Progression;
+  const run = { worldId: 'storm_planet', vehicleId: 'trail_buggy', mode: 'daily', distance: 1400, coins: 2000, bonusCoins: 500, trickXp: 100, endReason: 'crash', time: 80 };
+  const r = P.applyRunResults(run);
+  const d = RR.Save.data;
+  H.assert(!r.newRecord && !r.newWorldRecord && r.xp.record === 0, 'no record ' + JSON.stringify(r.xp));
+  H.assert(!('storm_planet' in d.bestDistances) && d.bestDistance === 0, 'bests untouched ' + JSON.stringify(d.bestDistances));
+  H.assert(d.stats.runs === 1 && d.stats.totalDistance === 1400 && d.stats.coinsCollected === 2000, 'stats still count');
+  H.assert(r.xp.distance === 140 && r.xp.coins === 80 && r.xp.tricks === 50 && d.coins >= 2500, 'coins and xp still paid');
+  H.assert(r.dailyBestPrev === 0 && r.newDailyBest === true, 'first daily attempt is a daily best');
+  // The daily best is read from the save (applyRunResults runs before Daily.recordAttempt).
+  RR.Daily.recordAttempt(1400);
+  const r2 = P.computeRunRewards(Object.assign({}, run, { distance: 1200 }));
+  H.assert(r2.dailyBestPrev === 1400 && !r2.newDailyBest, 'below today\'s best');
+  const r3 = P.computeRunRewards(Object.assign({}, run, { distance: 1500, dailyDay: RR.Daily.todayKey() }));
+  H.assert(r3.dailyBestPrev === 1400 && r3.newDailyBest, 'new daily best');
+  const r4 = P.computeRunRewards(Object.assign({}, run, { distance: 5000, dailyDay: '2000-01-01' }));
+  H.assert(r4.dailyBestPrev === 0 && !r4.newDailyBest, 'expired day is never a daily best');
+  // A normal run on the same world afterwards sets the real best.
+  RR.Save.data.unlockedWorlds.push('storm_planet');
+  const n = P.applyRunResults(Object.assign({}, run, { mode: 'normal', distance: 300 }));
+  H.assert(n.newWorldRecord && d.bestDistances.storm_planet === 300 && d.bestDistance === 300, 'normal run unchanged');
 });
 
 H.test('attract runs grant nothing and change nothing', () => {
@@ -537,9 +645,9 @@ H.test('mission text reads naturally', () => {
   H.assert(fmt('double_flips', 1) === 'Land 1 double flip', fmt('double_flips', 1));
 });
 
-// Builds a known mission set for tracking tests.
+// Builds a known mission set (for the sandbox's today) for tracking tests.
 function withMissions(RR, specs) {
-  RR.Missions.ensureToday(date('2026-06-01'));
+  RR.Missions.ensureToday();
   const active = RR.Save.data.missions.active;
   specs.forEach((s, i) => Object.assign(active[i], { stat: s.stat, mode: s.mode, target: s.target, progress: 0, completed: false, claimed: false, worldId: s.worldId }));
   return active;
@@ -666,9 +774,9 @@ H.test('daily varies across 60 days, all types reachable, sane values', () => {
 });
 
 H.test('status + recordAttempt: rollover, attempts, best, reward once per day', () => {
-  const RR = fresh();
-  const D = RR.Daily;
   const day = date('2026-08-15');
+  const RR = fresh({ clock: day });
+  const D = RR.Daily;
   const ch = D.getChallenge(day);
   RR.Missions.ensureToday(day);
   const act = RR.Save.data.missions.active;
@@ -689,9 +797,220 @@ H.test('status + recordAttempt: rollover, attempts, best, reward once per day', 
   H.assert(JSON.parse(stored(RR, KEY)).daily.completed === true, 'saved');
   // Next day resets.
   const tomorrow = addDays(day, 1);
+  RR.__clock.set(tomorrow);
   H.assert(deepEq(D.status(tomorrow), { day: '2026-08-16', best: 0, attempts: 0, completed: false }), 'rollover');
   r = D.recordAttempt(NaN, tomorrow);
   H.assert(r.best === 0 && r.attempts === 1 && !r.completedNow, 'NaN distance safe');
+});
+
+console.log('\nReview fixes: midnight, rollover, pacing, token sink');
+
+H.test('daily run that ends after midnight is expired: not recorded, not paid, today untouched', () => {
+  const clock = makeClock(new Date(2026, 8, 24, 23, 59, 30));
+  const RR = fresh({ clock });
+  const D = RR.Daily;
+  const chStart = D.getChallenge();
+  H.assert(chStart.day === '2026-09-24', 'started on the 24th');
+  // Yesterday already had an attempt; today's state must not be touched either way.
+  D.recordAttempt(10, chStart);
+  clock.set(new Date(2026, 8, 25, 0, 3, 0));
+  const today = D.status();
+  H.assert(today.day === '2026-09-25' && today.attempts === 0, 'today fresh');
+  const coins0 = RR.Save.data.coins, xp0 = RR.Save.data.xp, tok0 = RR.Save.data.tokens;
+  const done0 = RR.Save.data.stats.dailyCompleted;
+  for (const day of [chStart, chStart.day, new Date(2026, 8, 24, 12)]) {
+    const r = D.recordAttempt(5000, day);
+    H.assert(r.expired === true && r.completedNow === false && r.reward === null && r.best === 0 && r.attempts === 0 && r.levelUp === null, 'expired ' + JSON.stringify(r));
+    H.assert(r.target === chStart.targetDistance, 'target of the run\'s own challenge');
+  }
+  H.assert(deepEq(RR.Save.data.daily, { day: '2026-09-25', best: 0, attempts: 0, completed: false }), 'today untouched ' + JSON.stringify(RR.Save.data.daily));
+  H.assert(RR.Save.data.coins === coins0 && RR.Save.data.xp === xp0 && RR.Save.data.tokens === tok0 && RR.Save.data.stats.dailyCompleted === done0, 'nothing paid');
+  // A same-day run still completes and pays exactly once (explicit day, challenge object or none).
+  const ch = D.getChallenge();
+  const r1 = D.recordAttempt(ch.targetDistance + 1, ch);
+  H.assert(r1.expired === false && r1.completedNow && deepEq(r1.reward, ch.reward) && RR.Save.data.coins === coins0 + ch.reward.coins, 'same day pays');
+  const r2 = D.recordAttempt(ch.targetDistance + 50);
+  H.assert(!r2.completedNow && r2.reward === null && r2.attempts === 2 && RR.Save.data.coins === coins0 + ch.reward.coins, 'once');
+  // The pre-midnight state of the 24th was not rewritten by the expired calls.
+  H.assert(JSON.parse(stored(RR, KEY)).daily.day === '2026-09-25', 'saved state is today\'s');
+});
+
+H.test('missions roll over at midnight on their own; completed-unclaimed rewards (and bonus) are paid', () => {
+  const clock = makeClock(new Date(2026, 8, 24, 23, 50, 0));
+  const RR = fresh({ clock });
+  const M = RR.Missions;
+  const active = withMissions(RR, [
+    { stat: 'coins', mode: 'sum', target: 10 },
+    { stat: 'backflips', mode: 'sum', target: 1 },
+    { stat: 'fuelCans', mode: 'sum', target: 5 }
+  ]);
+  M.track('coins', 10); M.track('backflips', 1); M.track('fuelCans', 2);
+  H.assert(M.claimableCount() === 2 && active[2].progress === 2, 'day 1 state');
+  const owed = { coins: active[0].reward.coins + active[1].reward.coins, xp: active[0].reward.xp + active[1].reward.xp,
+    tokens: active[0].reward.tokens + active[1].reward.tokens };
+  const log = events(RR, ['missionAutoClaim']);
+  const coins0 = RR.Save.data.coins, xp0 = RR.Save.data.xp, tok0 = RR.Save.data.tokens;
+  clock.set(new Date(2026, 8, 25, 0, 1, 0));
+  // The first hot-path call after midnight rolls the set over and counts into TODAY's missions.
+  M.track('coins', 3);
+  const ms = RR.Save.data.missions;
+  H.assert(ms.day === '2026-09-25' && ms.active[0].id.indexOf('m-2026-09-25') === 0, 'rolled over by track()');
+  for (const m of ms.active) H.assert(m.progress === (m.stat === 'coins' ? 3 : 0), 'progress into today ' + m.stat + ' ' + m.progress);
+  H.assert(RR.Save.data.coins === coins0 + owed.coins && RR.Save.data.xp === xp0 + owed.xp && RR.Save.data.tokens === tok0 + owed.tokens, 'unclaimed rewards credited');
+  H.assert(log.length === 1 && log[0].p.missions.length === 2 && log[0].p.bonus === false && log[0].p.day === '2026-09-24' && deepEq(log[0].p.reward, owed), 'event ' + JSON.stringify(log[0] && log[0].p.reward));
+  H.assert(M.claimableCount() === ms.active.filter((m) => m.completed && !m.claimed).length, 'badge matches the screen');
+  H.assert(JSON.parse(stored(RR, KEY)).missions.day === '2026-09-25', 'saved');
+
+  // All three completed (one claimed) at rollover → the other two AND the bonus are paid.
+  const B = fresh({ clock: makeClock(new Date(2026, 8, 25, 22, 0, 0)) });
+  const act = withMissions(B, [{ stat: 'coins', mode: 'sum', target: 1 }, { stat: 'coins', mode: 'sum', target: 2 }, { stat: 'coins', mode: 'sum', target: 3 }]);
+  B.Missions.track('coins', 5);
+  B.Missions.claim(act[0].id);
+  const bl = events(B, ['missionAutoClaim']);
+  const t0 = B.Save.data.tokens, c0 = B.Save.data.coins;
+  B.__clock.set(new Date(2026, 8, 26, 9, 0, 0));
+  H.assert(!B.Missions.canClaimBonus(), 'bonus of the new day not ready');
+  H.assert(bl.length === 1 && bl[0].p.bonus === true && bl[0].p.missions.length === 2, 'bonus auto-paid');
+  H.assert(B.Save.data.coins === c0 + act[1].reward.coins + act[2].reward.coins + B.Missions.BONUS.coins, 'coins');
+  H.assert(B.Save.data.tokens === t0 + act[1].reward.tokens + act[2].reward.tokens + B.Missions.BONUS.tokens, 'tokens');
+  // Nothing owed → silent rollover.
+  const C = fresh({ clock: makeClock(new Date(2026, 8, 25, 12, 0, 0)) });
+  C.Missions.getActive();
+  const cl = events(C, ['missionAutoClaim']);
+  C.__clock.set(new Date(2026, 8, 26, 12, 0, 0));
+  H.assert(C.Missions.getActive()[0].id.indexOf('m-2026-09-26') === 0 && cl.length === 0, 'silent');
+  // A claim on a set that expired returns 'unknown' (it was auto-claimed) instead of paying twice.
+  const staleId = C.Missions.getActive()[0].id;
+  C.__clock.set(new Date(2026, 8, 27, 12, 0, 0));
+  H.assert(C.Missions.claim(staleId).reason === 'unknown', 'stale claim refused');
+});
+
+H.test('level rewards run to 50: every level gives something; chests / tokens are paid', () => {
+  const RR = fresh();
+  const P = RR.Progression;
+  for (let l = 2; l <= 50; l++) H.assert(P.rewardsForLevel(l).length >= 1, 'reward at level ' + l);
+  const chest = P.rewardsForLevel(17).find((r) => r.type === 'coins');
+  H.assert(chest && chest.amount === 1500 + 100 * 17 && /3,200/.test(chest.text), 'chest at 17');
+  H.assert(P.rewardsForLevel(20).some((r) => r.type === 'tokens' && r.amount === 1) && P.rewardsForLevel(20).some((r) => r.type === 'cosmetic'), 'token + paint at 20');
+  H.assert(!P.rewardsForLevel(16).some((r) => r.type === 'coins'), 'no chest where a world unlocks');
+  H.assert(P.rewardsForLevel(40).some((r) => r.type === 'cosmetic' && r.id === 'paint_obsidian'), 'last paint at 40');
+  let chestSum = 0, tokenSum = 0;
+  for (let l = 2; l <= 50; l++) for (const r of P.rewardsForLevel(l)) { if (r.type === 'coins') chestSum += r.amount; if (r.type === 'tokens') tokenSum += r.amount; }
+  H.assert(tokenSum === 7, 'tokens at 20,25,…,50: ' + tokenSum);
+  const log = events(RR, ['levelup', 'coins']);
+  const res = P.addXp(P.xpToReachLevel(50));
+  H.assert(res.level === 50 && log.filter((e) => e.n === 'levelup').length === 49, 'levels');
+  H.assert(RR.Save.data.coins === chestSum && RR.Save.data.tokens === tokenSum, 'paid ' + RR.Save.data.coins + '/' + chestSum);
+  H.assert(RR.Save.data.cosmetics.unlocked.length === P.COSMETICS.length, 'all paints');
+  H.assert(JSON.parse(stored(RR, KEY)).coins === chestSum, 'one batched save persisted');
+});
+
+H.test('token sink: convert tokens to coins once every vehicle is owned', () => {
+  const RR = fresh();
+  const P = RR.Progression;
+  P.addTokens(3);
+  let st = P.tokenSinkStatus();
+  H.assert(!st.available && st.reason === 'vehicles' && st.tokens === 3, 'locked while vehicles remain');
+  H.assert(deepEq(P.convertTokens(1), { ok: false, reason: 'vehicles', tokens: 0, coins: 0 }), 'refused');
+  for (const v of RR.Vehicles.list) if (RR.Save.data.unlockedVehicles.indexOf(v.id) < 0) RR.Save.data.unlockedVehicles.push(v.id);
+  setLevel(RR, 10);
+  const coinsBase = RR.Save.data.coins;
+  st = P.tokenSinkStatus();
+  H.assert(st.available && st.reason === '' && st.value === 1500 + 50 * 10 && P.tokenValue() === st.value, 'available ' + JSON.stringify(st));
+  const log = events(RR, ['wallet', 'coins', 'tokens']);
+  const r = P.convertTokens(2);
+  H.assert(r.ok && r.tokens === 2 && r.coins === 2 * st.value, 'converted ' + JSON.stringify(r));
+  H.assert(RR.Save.data.tokens === 1 && RR.Save.data.coins === coinsBase + 2 * st.value, 'balances');
+  H.assert(log.some((e) => e.n === 'wallet' && e.p.tokens === 1 && e.p.coins === RR.Save.data.coins) && log.some((e) => e.n === 'tokens'), 'events');
+  H.assert(JSON.parse(stored(RR, KEY)).tokens === 1, 'saved');
+  H.assert(!P.convertTokens(5).ok && P.convertTokens(5).reason === 'tokens', 'more than owned');
+  H.assert(!P.convertTokens(0).ok && !P.convertTokens(-1).ok && !P.convertTokens(NaN).ok, 'bad n');
+  const all = P.convertTokens();
+  H.assert(all.ok && all.tokens === 1 && RR.Save.data.tokens === 0, 'default converts all');
+  st = P.tokenSinkStatus();
+  H.assert(!st.available && st.reason === 'tokens', 'nothing left');
+});
+
+// Median-player pacing model (review t3_sim): 1–2.5 km runs on the newest world, pickup coins and trick
+// bonus per metre measured in-browser, half the bot's trick rate, 8 runs a day, one mission a run.
+H.test('pacing: tier III ≈ run 40, Storm Runner ≈ run 60, distance ≥ 25 % of run XP', () => {
+  const RR = fresh({ clock: new Date(2026, 8, 24, 12) });
+  const P = RR.Progression, M = RR.Missions, d = RR.Save.data;
+  const rate = { green_valley: [1.58, 2.8], rocky_highlands: [1.5, 2.44], desert_canyon: [2.31, 1.81], snow_peaks: [2.31, 2.68],
+    volcanic_ridge: [3.61, 1.85], moon_base: [2.81, 3.72], neon_city: [3.85, 4.79], storm_planet: [3.18, 5.55] };
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const first = {};
+  const xp = { distance: 0, total: 0, tricks: 0 };
+  let day = new Date(2026, 8, 24, 12);
+  for (let run = 1; run <= 80; run++) {
+    if (run > 1 && (run - 1) % 8 === 0) { day = new Date(day.getTime() + 86400000); RR.__clock.set(day); }
+    const w = d.unlockedWorlds[d.unlockedWorlds.length - 1];
+    const dist = 1000 + rnd() * 1500;
+    const coins = Math.round(rate[w][0] * dist), bonus = Math.round(rate[w][1] * dist * 0.5);
+    const res = P.applyRunResults({ worldId: w, vehicleId: d.selectedVehicle, mode: 'normal', distance: dist, coins, bonusCoins: bonus,
+      tokens: 0, trickXp: Math.round(bonus / 5), bossXp: 0, endReason: 'crash' });
+    xp.distance += res.xp.distance; xp.tricks += res.xp.tricks; xp.total += res.xp.total;
+    const act = M.getActive();
+    const open = act.find((m) => !m.completed);
+    if (open) { open.progress = open.target; open.completed = true; }
+    for (const m of act) if (m.completed && !m.claimed) M.claim(m.id);
+    if (M.canClaimBonus()) M.claimBonus();
+    if ((run - 1) % 8 === 1) RR.Daily.recordAttempt(3000);
+    for (const v of RR.Vehicles.list) {
+      const st = P.vehicleStatus(v.id);
+      if (!st.unlocked && st.canTokens) P.unlockVehicle(v.id, 'tokens'); else if (!st.unlocked && st.canCoins) P.unlockVehicle(v.id, 'coins');
+      if (P.vehicleStatus(v.id).unlocked) { if (!first[v.id]) first[v.id] = run; P.selectVehicle(v.id); }
+    }
+    for (const x of RR.Worlds.list) { const st = P.worldStatus(x.id); if (!st.unlocked && st.canBuy) P.unlockWorld(x.id); }
+    const v = d.selectedVehicle;
+    for (;;) {
+      let best = null;
+      for (const c of RR.Vehicles.UPGRADE_CATEGORIES) { const cu = P.canUpgrade(v, c.id); if (cu.ok && (!best || cu.cost < best.cost)) best = Object.assign({ cat: c.id }, cu); }
+      if (!best) break;
+      P.upgrade(v, best.cat);
+    }
+    if (d.level >= 12 && !first.tier3) first.tier3 = run;
+  }
+  const share = xp.distance / xp.total;
+  H.assert(first.tier3 >= 32 && first.tier3 <= 50, 'tier III at run ' + first.tier3 + ' (was 25)');
+  H.assert(first.storm_runner >= 50 && first.storm_runner <= 75, 'Storm Runner at run ' + first.storm_runner + ' (was 43)');
+  H.assert(share >= 0.25, 'distance share ' + (share * 100).toFixed(1) + '%');
+  H.assert(xp.tricks <= xp.total * 0.5, 'tricks no longer dominate');
+});
+
+// Measured over the first 2 km, where a daily is actually played (targets 600–1500 m).
+H.test('daily copy matches the terrain: Giant Steps "+60%" and Chaos "+30%" hills (±10 points)', () => {
+  const RR = fresh();
+  H.load(['js/game/terrain.js'], RR.__ctx);
+  const amp = (w, mul) => {
+    let local = 0, n = 0;
+    for (const seed of [1013, 2026, 3039, 4052, 5065, 6078]) {
+      const T = new RR.Terrain({ seed, world: w, modifiers: { terrainAmpMul: mul } });
+      T.ensure(2200);
+      const hs = [];
+      for (let x = 0; x <= 2000; x += 2) hs.push(T.heightAt(x));
+      for (let i = 50; i < hs.length - 50; i++) {
+        let s = 0;
+        for (let j = -50; j <= 50; j += 5) s += hs[i + j];
+        local += Math.abs(hs[i] - s / 21); n++;
+      }
+    }
+    return local / n;
+  };
+  for (const id of ['extreme_hills', 'chaos']) {
+    const T = RR.Daily.TYPES.find((t) => t.id === id);
+    const built = T.build(RR.Worlds.byId('green_valley'));
+    const label = built.labels.find((l) => /^Hills \+\d+%$/.test(l));
+    H.assert(label, id + ' has a hills label');
+    const promised = +/\+(\d+)%/.exec(label)[1] / 100;
+    let sum = 0;
+    const ws = RR.Worlds.list.map((w) => w.id);
+    for (const w of ws) sum += amp(w, built.terrainAmpMul) / amp(w, 1) - 1;
+    const measured = sum / ws.length;
+    H.assert(Math.abs(measured - promised) <= 0.1, id + ': promised +' + (promised * 100) + '%, measured +' + (measured * 100).toFixed(0) + '%');
+    if (id === 'extreme_hills') H.assert(T.description.indexOf(Math.round(promised * 100) + '%') >= 0, 'description matches the label');
+  }
 });
 
 H.test('Bus events: levelup/coins/tokens/upgrade/unlock/missionComplete/missionClaimed/settings/saveReset', () => {

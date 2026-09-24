@@ -12,8 +12,13 @@
  * Contract additions (documented, never renames):
  *  - getChallenge(day?) accepts a Date, a 'YYYY-MM-DD' string or nothing (today); returns a fresh
  *    object each call. DailyChallenge also carries {worldName, difficulty 1..3}.
- *  - status(date?) / recordAttempt(distance, date?) / timeUntilNext(now?) accept an optional Date.
- *  - recordAttempt() also returns {attempts, target, levelUp|null}.
+ *  - status(date?) / timeUntilNext(now?) accept an optional Date.
+ *  - recordAttempt(distance, day?, now?): `day` is the challenge day the run was STARTED for — a
+ *    DailyChallenge (its .day), a 'YYYY-MM-DD' string or a Date; omitted = the day of `now`. `now`
+ *    (Date, default the current time) exists for tests. A run whose day is no longer today (it ended
+ *    after midnight) is EXPIRED: nothing is recorded or paid and today's state is left untouched —
+ *    it returns {completedNow:false, expired:true, best:0, reward:null, attempts:0, target, levelUp:null}.
+ *  - recordAttempt() also returns {attempts, target, levelUp|null, expired:false}.
  *  - RR.Daily.TYPES — the challenge catalogue (read-only).
  */
 (function () {
@@ -56,7 +61,11 @@
       id: 'extreme_hills', name: 'Giant Steps', icon: '⛰', difficulty: 3, baseTarget: 950,
       description: 'The mountains grew overnight — every hill is 60% taller.',
       exclude: [],
-      build: () => ({ terrainAmpMul: 1.6, labels: ['Hills +60%'] })
+      // The terrain's slope limiter eats part of terrainAmpMul: over the first 2 km (where a daily is
+      // played — targets are 600–1500 m) ×1.6 only gave ≈ +45 % local hill amplitude, ×1.8 gives
+      // +53…63 % (mean ≈ +58 %) across the 8 worlds, matching the copy. tests/progression.test.js
+      // re-measures it. Stock-car completion rate is unchanged vs ×1.6 (casual bot ≈ 60 %).
+      build: () => ({ terrainAmpMul: 1.8, labels: ['Hills +60%'] })
     },
     {
       id: 'ice', name: 'Black Ice', icon: '❄', difficulty: 3, baseTarget: 900,
@@ -91,8 +100,9 @@
       id: 'chaos', name: 'Chaos Run', icon: '🎲', difficulty: 2, baseTarget: 1000,
       description: 'Floaty gravity, wild winds, taller hills and double coins — all at once.',
       exclude: ['moon_base'],
-      build: () => ({ gravityMul: 0.8, windMul: 1.8, terrainAmpMul: 1.25, coinMul: 2,
-        labels: ['Gravity 80%', 'Wind ×1.8', 'Hills +25%', 'Coin value ×2'] })
+      // terrainAmpMul 1.4 → measured hill amplitude ≈ +30 % over the first 2 km (1.25 gave ≈ +17 %).
+      build: () => ({ gravityMul: 0.8, windMul: 1.8, terrainAmpMul: 1.4, coinMul: 2,
+        labels: ['Gravity 80%', 'Wind ×1.8', 'Hills +30%', 'Coin value ×2'] })
     }
   ].map((t) => Object.freeze(Object.assign(t, { exclude: Object.freeze(t.exclude) }))));
 
@@ -206,10 +216,17 @@
     return { day: st.day, best: st.best, attempts: st.attempts, completed: st.completed };
   }
 
-  function recordAttempt(distance, date) {
-    const dt = toDate(date);
-    const ch = getChallenge(dt);
+  function recordAttempt(distance, day, now) {
+    const nowDate = now instanceof Date && Number.isFinite(now.getTime()) ? now : new Date();
+    const todayK = U.todayKey(nowDate);
+    const dayArg = day && typeof day === 'object' && !(day instanceof Date) && typeof day.day === 'string' ? day.day : day;
+    const ch = getChallenge(dayArg === undefined || dayArg === null || dayArg === '' ? nowDate : dayArg);
     const dist = typeof distance === 'number' && Number.isFinite(distance) ? U.clamp(Math.floor(distance), 0, 1e7) : 0;
+    if (ch.day !== todayK) {
+      // The run was played for a challenge that ended at midnight: it can neither complete nor be
+      // paid for today's (different) challenge, and rolling the save back would wipe today's state.
+      return { completedNow: false, expired: true, best: 0, reward: null, attempts: 0, target: ch.targetDistance, levelUp: null };
+    }
     const P = RR.Progression;
     const run = () => {
       const st = rollover(ch.day);
@@ -229,7 +246,7 @@
         if (RR.Missions) RR.Missions.track('dailyComplete', 1);
       }
       RR.Save.save();
-      return { completedNow, best: st.best, reward, attempts: st.attempts, target: ch.targetDistance, levelUp };
+      return { completedNow, expired: false, best: st.best, reward, attempts: st.attempts, target: ch.targetDistance, levelUp };
     };
     return P && P.batch ? P.batch(run) : run();
   }

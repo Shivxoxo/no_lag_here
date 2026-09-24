@@ -13,7 +13,11 @@
  * vehicle unlock with tokens · world unlock with coins · mission force-complete + CLAIM · daily run uses
  * the daily world/seed/modifiers · mobile touch (GAS hold drives, TILT rotates in the air) · resize keeps
  * the backing store = CSS size × dpr · corrupted save → defaults · long simulated run without NaN ·
- * integration rules (audio init on gesture, final gravity, event coin multipliers, Ion Thruster).
+ * integration rules (audio init on gesture, final gravity, event coin multipliers, Ion Thruster) ·
+ * shell rules: R / pause RESTART bank the run (crash slow-mo, out-of-fuel coast), a daily that ends after
+ * midnight is expired (not credited to the new day), level-ups survive leaving results early, garage
+ * RIDE AGAIN / vehicle UPGRADE / BACK routes, frozen attract behind menu screens, Tab keeps the run
+ * playing, one confirm per double activation, sliding thumb hands GAS over to TILT, no keycaps on touch.
  */
 'use strict';
 const path = require('path');
@@ -473,8 +477,29 @@ async function scenarioMobile(browser, url, T) {
   const back = await spin('#touch-controls [data-tc="leanBack"]');
   const fwd = await spin('#touch-controls [data-tc="leanForward"]');
   ok(back > 0.15 && fwd < -0.15, 'TILT buttons rotate the car in the air (↺ ' + back.toFixed(2) + ' rad, ↻ ' + fwd.toFixed(2) + ' rad)');
-  const rs = await ev(page, () => { const c = document.getElementById('game-canvas'); return { w: c.width, cw: c.clientWidth, dpr: RR.Game.renderer.dpr }; });
-  ok(rs.w === Math.round(rs.cw * rs.dpr) && rs.dpr === 2, 'high-DPI backing store (' + rs.w + ' = ' + rs.cw + ' × ' + rs.dpr + ')');
+  // (the renderer's dynamic resolution may scale r.dpr below the device ratio on a slow machine)
+  const rs = await ev(page, () => { const c = document.getElementById('game-canvas'), r = RR.Game.renderer; return { w: c.width, cw: c.clientWidth, dpr: r.dpr, dev: r.deviceRatio }; });
+  ok(rs.w === Math.round(rs.cw * rs.dpr) && rs.dev === 2, 'high-DPI backing store (' + rs.w + ' = ' + rs.cw + ' × ' + rs.dpr + ', device ratio ' + rs.dev + ')');
+  // a thumb sliding from GAS onto TILT hands the press over; sliding into empty space keeps GAS
+  const lf = await touchCenter(page, '#touch-controls [data-tc="leanForward"]');
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: gas.x, y: gas.y, id: 7 }] });
+  await sleep(80);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 370, y: 150, id: 7 }] });
+  await sleep(80);
+  const midSlide = await ev(page, () => Object.assign({}, RR.Input.getControls()));
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: lf.x, y: lf.y, id: 7 }] });
+  await sleep(80);
+  const onTilt = await ev(page, () => Object.assign({ pressed: [...document.querySelectorAll('.tc-btn.pressed')].map((e) => e.dataset.tc).join() }, RR.Input.getControls()));
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(80);
+  const lifted = await ev(page, () => ({ c: Object.assign({}, RR.Input.getControls()), pressed: document.querySelectorAll('.tc-btn.pressed').length }));
+  ok(midSlide.throttle === 1 && onTilt.throttle === 0 && onTilt.lean === -1 && onTilt.pressed === 'leanForward' && lifted.c.throttle === 0 && lifted.c.lean === 0 && lifted.pressed === 0,
+    'sliding thumb: empty space keeps GAS, GAS → TILT hands the press over, lifting releases all (' + JSON.stringify(onTilt) + ')');
+  // results on a touch device: no keyboard keycaps, touch wording in the no-tricks tip
+  await ev(page, () => { const r = RR.Game.run; r.distance = 12; RR.Game.quitRun(); });
+  await waitScreen(page, 'results');
+  const kb = await ev(page, () => { const k = document.querySelector('.scr-results [data-act="retry"] kbd'); const tip = document.querySelector('.scr-results .res-tricks .empty'); return { kbd: !!k && getComputedStyle(k).display !== 'none', tip: tip ? tip.textContent : '' }; });
+  ok(!kb.kbd && /TILT button/.test(kb.tip), 'touch results: no R keycap, touch trick tip');
   await closePage(p);
 }
 
@@ -561,10 +586,174 @@ async function scenarioRules(browser, url, T) {
   await closePage(p);
 }
 
+async function scenarioShell(browser, url, T) {
+  console.log('  [' + T + '] shell: banked restarts, daily expiry, level-ups, garage routes, menu attract, Tab, confirms');
+  const p = await openPage(browser, url, null, T + ' shell');
+  const { page } = p;
+  await ev(page, () => { RR.Save.data.seenTutorial = true; RR.Save.save(); });
+  const dismissModals = async () => { await sleep(600); while (await ev(page, () => RR.UI.modalOpen)) { await modalOk(page); await sleep(300); } };
+  const snap = () => ev(page, () => { const r = RR.Game.run; return { runCoins: r ? r.coins + r.bonusCoins : 0, dist: r ? Math.floor(r.distance) : 0,
+    save: RR.Save.data.coins, runs: RR.Save.data.stats.runs, best: RR.Save.data.bestDistances.green_valley || 0, state: RR.Game.state }; });
+  // drive a run forward through the real Run (physics + coins) without real-time waiting
+  const advance = (m) => ev(page, (m) => {
+    const r = RR.Game.run; r.fuel = r.fuelMax;
+    for (let i = 0; i < 1500 && r.distance < m && r.state === 'running'; i++) { r.body.setVelocity(Math.max(r.body.vx, 14), r.body.vy); r.update(1 / 60); }
+    r.onCoin(25, r.body.x, r.body.y);
+  }, m);
+  await ev(page, () => RR.Game.startRun({ worldId: 'green_valley', vehicleId: 'trail_buggy' }));
+  await waitState(page, 'playing');
+  // R on the CRASHED stamp banks the run
+  await advance(160);
+  const hookBank = () => ev(page, () => {
+    window.__sum = null; window.__rw = null; const orig = RR.Progression.applyRunResults;
+    RR.Progression.applyRunResults = function (sm) { const rw = orig.apply(this, arguments); window.__sum = sm; window.__rw = rw; RR.Progression.applyRunResults = orig; return rw; };
+  });
+  await ev(page, () => { const r = RR.Game.run; r.powerUps.clear(); r.invulnTime = 0; r.crash('head'); window.__oldRun = r; });
+  await hookBank();
+  await sleep(250);
+  let a = await snap();
+  await page.keyboard.press('KeyR');
+  await sleep(300);
+  let b = await snap();
+  const cs = await ev(page, () => window.__sum && { coins: window.__sum.coins + window.__sum.bonusCoins, dist: Math.floor(window.__sum.distance), reason: window.__sum.endReason, total: window.__rw.totalCoins });
+  ok(b.state === 'playing' && await ev(page, () => RR.Game.run !== window.__oldRun && RR.Game.run.state === 'running'), 'R during the crash slow-mo starts a fresh run');
+  ok(cs && cs.reason === 'crash' && cs.coins >= a.runCoins && b.save - a.save === cs.total && cs.total === cs.coins && b.runs === a.runs + 1 && b.best === cs.dist,
+    'R during the crash slow-mo banks the run (coins +' + (b.save - a.save) + '/' + (cs && cs.coins) + ', runs ' + a.runs + '→' + b.runs + ', best ' + b.best + ' m, endReason ' + (cs && cs.reason) + ')');
+  // pause → RESTART banks too (no confirm)
+  await advance(90);
+  await page.keyboard.press('KeyP');
+  await waitScreen(page, 'pause');
+  a = await snap();                                   // paused: the run can't collect more meanwhile
+  await clickAct(page, 'restart');
+  await waitState(page, 'playing');
+  b = await snap();
+  ok(b.save - a.save === a.runCoins && b.runs === a.runs + 1 && !(await ev(page, () => RR.UI.modalOpen)), 'pause → RESTART banks the run (coins +' + (b.save - a.save) + ')');
+  // out-of-fuel coast → R banks with endReason 'fuel'
+  await advance(70);
+  await ev(page, () => {
+    const r = RR.Game.run; r.fuel = 0; for (let i = 0; i < 6; i++) r.update(1 / 60);
+    window.__sum = null; const orig = RR.Progression.applyRunResults;
+    RR.Progression.applyRunResults = function (sm) { window.__sum = sm; RR.Progression.applyRunResults = orig; return orig.apply(this, arguments); };
+  });
+  a = await snap();
+  await page.keyboard.press('KeyR');
+  await sleep(300);
+  b = await snap();
+  const fsum = await ev(page, () => window.__sum && window.__sum.endReason);
+  ok(b.runs === a.runs + 1 && b.save >= a.save + a.runCoins && fsum === 'fuel', 'R while coasting out of fuel banks the run (endReason ' + fsum + ')');
+  // results → R does not bank twice
+  await advance(40);
+  await ev(page, () => RR.Game.quitRun());
+  await waitScreen(page, 'results');
+  a = await snap();
+  await page.keyboard.press('KeyR');
+  await waitState(page, 'playing');
+  b = await snap();
+  ok(b.save === a.save && b.runs === a.runs, 'R on the results screen does not bank the run again');
+  // quitRun keeps the crash end reason
+  await advance(30);
+  await ev(page, () => { const r = RR.Game.run; r.powerUps.clear(); r.invulnTime = 0; r.crash('head');
+    window.__sum = null; const orig = RR.Progression.applyRunResults;
+    RR.Progression.applyRunResults = function (sm) { window.__sum = sm; RR.Progression.applyRunResults = orig; return orig.apply(this, arguments); };
+    RR.Game.quitRun(); });
+  await waitScreen(page, 'results');
+  ok(await ev(page, () => window.__sum && window.__sum.endReason === 'crash' && /Crashed/.test(document.querySelector('.scr-results [data-ref="reason"]').textContent)), 'QUIT during the crash slow-mo keeps endReason crash');
+  // daily started before midnight, ended after: expired, never credited to the new day's challenge
+  await ev(page, () => RR.Game.quitToMenu('menu'));
+  await waitScreen(page, 'menu');
+  await dismissModals();                               // level-ups from the banked runs show here
+  const dm = await ev(page, () => {
+    const U = RR.Util, d = new Date(); d.setDate(d.getDate() - 1);
+    const yesterday = RR.Daily.getChallenge(d);
+    const before = JSON.stringify(RR.Save.data.daily), coins0 = RR.Save.data.coins;
+    RR.Game.startRun({ daily: yesterday });
+    const r = RR.Game.run; r.distance = Math.max(yesterday.targetDistance, RR.Daily.getChallenge().targetDistance) + 50;
+    window.__dr = null; const orig = RR.Daily.recordAttempt;
+    RR.Daily.recordAttempt = function () { const res = orig.apply(this, arguments); window.__dr = res; RR.Daily.recordAttempt = orig; return res; };
+    RR.Game.quitRun();
+    return { dr: window.__dr, before, after: JSON.stringify(RR.Save.data.daily), today: U.todayKey(), day: yesterday.day, dailyCoins: RR.Save.data.coins - coins0 };
+  });
+  await waitScreen(page, 'results');
+  const panel = await ev(page, () => document.querySelector('.scr-results [data-ref="daily"]').textContent);
+  ok(dm.dr && dm.dr.expired === true && !dm.dr.completedNow && dm.before === dm.after, 'daily that ends after midnight is expired and leaves today\'s daily untouched (' + dm.day + ' vs ' + dm.today + ')');
+  ok(/expired at midnight/.test(panel), 'results daily panel shows the run\'s own challenge as expired');
+  // level-up earned on a run left early (MENU) → modal on the menu, never a mid-run toast
+  await ev(page, () => RR.Game.quitToMenu('menu'));
+  await dismissModals();
+  await ev(page, () => { RR.Save.data.xp = RR.Progression.xpToReachLevel(RR.Save.data.level + 1) - 5; RR.Save.save(); RR.Game.startRun({}); });
+  await waitState(page, 'playing');
+  await ev(page, () => { RR.Game.run.distance = 400; RR.Game.quitRun(); });
+  await waitScreen(page, 'results');
+  await sleep(500);
+  await clickAct(page, 'toMenu');
+  await page.waitForFunction(() => RR.UI.modalOpen, null, { timeout: 3000 }).catch(() => {});
+  ok(await ev(page, () => RR.UI.current === 'menu' && RR.UI.modalOpen && /LEVEL UP/.test(document.querySelector('.modal.open .modal-title').textContent)), 'level-up modal shows on the menu after leaving results early');
+  await modalOk(page);
+  // attract frozen behind menu screens, live behind the title
+  await clickAct(page, 'garage');
+  await waitScreen(page, 'garage');
+  await sleep(400);
+  const t0 = await ev(page, () => RR.Game.attract ? RR.Game.attract.time : -1);
+  await sleep(500);
+  const t1 = await ev(page, () => RR.Game.attract ? RR.Game.attract.time : -1);
+  ok(t0 >= 0 && t1 === t0, 'attract run is frozen behind the garage (' + t0.toFixed(2) + ' → ' + t1.toFixed(2) + ')');
+  // garage routes: BACK from menu-garage → menu; vehicles → UPGRADE → BACK → vehicles; START RUN
+  await clickAct(page, 'back');
+  await waitScreen(page, 'menu');
+  const t2 = await ev(page, () => RR.Game.attract.time);
+  await sleep(400);
+  ok(await ev(page, (t) => RR.Game.attract.time > t, t2), 'attract drives again behind the title screen');
+  await clickAct(page, 'play');
+  await waitScreen(page, 'vehicles');
+  await page.click('.veh-card.selected [data-act="upgradeVehicle"]');
+  await waitScreen(page, 'garage');
+  const lbl = await ev(page, () => document.querySelector('.scr-garage [data-ref="startLabel"]').textContent);
+  await clickAct(page, 'back');
+  await waitScreen(page, 'vehicles');
+  ok(lbl === 'START RUN', 'vehicle select UPGRADE → garage (START RUN) → BACK returns to vehicle select');
+  await clickAct(page, 'start');
+  await waitState(page, 'playing');
+  // Tab during a run is swallowed (no focus loss → no auto-pause)
+  await page.keyboard.press('Tab');
+  await sleep(200);
+  ok((await state(page)) === 'playing', 'Tab during a run keeps playing');
+  // results → GARAGE → RIDE AGAIN in one tap
+  await ev(page, () => { RR.Game.run.distance = 60; RR.Game.quitRun(); });
+  await waitScreen(page, 'results');
+  await clickAct(page, 'toGarage');
+  await waitScreen(page, 'garage');
+  await dismissModals();
+  const ra = await ev(page, () => document.querySelector('.scr-garage [data-ref="startLabel"]').textContent);
+  await clickAct(page, 'garageStart');
+  await waitState(page, 'playing');
+  ok(ra === 'RIDE AGAIN' && await ev(page, () => RR.Game.run.worldId === RR.Game.lastParams.worldId), 'results → GARAGE → RIDE AGAIN starts the next run');
+  await ev(page, () => RR.Game.quitToMenu('menu'));
+  await waitScreen(page, 'menu');
+  await dismissModals();
+  // double activation of UNLOCK queues one confirm; the double-tap's second tap does not dismiss it
+  await ev(page, () => { RR.Progression.addCoins(30000); if (RR.Save.data.level < 2) RR.Progression.addXp(RR.Progression.xpToReachLevel(2)); });
+  await dismissModals();
+  await ev(page, () => RR.UI.show('vehicles'));
+  await waitScreen(page, 'vehicles');
+  await sleep(300);
+  await ev(page, () => { const b = document.querySelector('[data-ref="uc_dirt_runner"]'); b.click(); b.click(); });
+  await sleep(250);
+  const box = await ev(page, () => { const m = document.querySelector('.modal.open'); const r = m.getBoundingClientRect(); return { x: r.left + 8, y: r.top + 8 }; });
+  await page.mouse.click(box.x, box.y);                 // backdrop tap right after opening
+  await sleep(100);
+  ok(await ev(page, () => RR.UI.modalOpen), 'a backdrop tap right after the confirm opened does not dismiss it');
+  await modalOk(page);
+  await sleep(400);
+  const dbl = await ev(page, () => ({ modal: RR.UI.modalOpen, owned: RR.Save.data.unlockedVehicles.indexOf('dirt_runner') >= 0,
+    err: [...document.querySelectorAll('#toasts .toast-txt')].some((t) => /failed/i.test(t.textContent)) }));
+  ok(dbl.owned && !dbl.modal && !dbl.err, 'double-clicked UNLOCK: one confirm, one unlock, no error toast');
+  await closePage(p);
+}
+
 // ================================================================== main
 async function suite(browser, url, T) {
   console.log('\n=== ' + T + ': ' + url + ' ===');
-  const scenarios = [scenarioMenuAndScreens, scenarioDriving, scenarioMeta, scenarioMobile, scenarioRobustness, scenarioRules];
+  const scenarios = [scenarioMenuAndScreens, scenarioDriving, scenarioMeta, scenarioMobile, scenarioRobustness, scenarioRules, scenarioShell];
   for (const sc of scenarios) {
     try { await sc(browser, url, T); } catch (e) { ok(false, T + ' ' + sc.name + ' threw: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e)); }
   }

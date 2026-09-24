@@ -12,15 +12,25 @@
  *  - Paused / results / tutorial: no run.update — the frozen frame is re-rendered only when needed
  *    (entering the state, resize, settings change).
  *  - Auto-pause on tab hide / window blur; Audio.suspend/resume follow visibility.
- *  - Resize / orientation change (debounced + ResizeObserver + visualViewport) → renderer.resize() →
+ *  - Resize: the canvas ResizeObserver resizes synchronously (it fires once per frame, before paint) and
+ *    redraws the current frame, so the canvas is never shown stretched during a drag / rotation; window
+ *    resize / visualViewport / orientationchange remain as debounced fallbacks → renderer.resize() →
  *    camera.setViewport for the active and attract runs.
+ *  - Menu attract: full-rate drive only behind the title screen; behind the other (opaque, blurred)
+ *    menu screens the attract is frozen and re-rendered only on screen change / resize / settings.
  *  - Hotkeys via RR.Input: P/Esc pause toggle (Esc = back in menus / closes modals), R restart
  *    (playing / paused / results), M mute (sound + music, persisted, toast).
+ *  - Runs are banked exactly once: endRun = bankRun (Progression.applyRunResults + Daily.recordAttempt
+ *    with the run's own challenge day) + the results UI. R / pause RESTART mid-run (also on the CRASHED
+ *    stamp or while coasting out of fuel) banks the run first, then starts the next one.
  *  - Audio: RR.Audio.init() on Input 'firstGesture', then settings + current music are applied.
  *
  * Contract additions (documented, never renames):
- *  - quitRun()          — pause-menu QUIT: run.quit() → results (collected coins still count).
- *  - quitToMenu(screen) — optional screen id to land on (results → GARAGE uses 'garage').
+ *  - quitRun()          — pause-menu QUIT: run.quit() → results (collected coins still count; the run's
+ *                         own end reason — crash / fuel / quit — is kept).
+ *  - quitToMenu(screen, params) — optional screen id (+ params for RR.UI.show) to land on
+ *                         (results → GARAGE uses 'garage', {from:'results'}).
+ *  - requestRender()    — redraw the frozen frame / menu backdrop on the next frame.
  *  - refreshAttract()   — rebuild the menu's attract run after a world/vehicle/paint change.
  *  - toggleMute(), applySettings(settings?), lastParams, run / attract / renderer (getters),
  *    frame (rAF frame counter) and state (getter) for tests; errors (count).
@@ -57,6 +67,9 @@
   let menuTargetX = null;
   let menuTargetFor = '';
   let menuOffsetPx = 0;
+  let menuScreenSeen = null;           // RR.UI.current last seen by the menu branch of step()
+  let fullFrame = false;               // this frame drew a continuously animated scene (run / title attract)
+  let qualityHintShown = false;
 
   const log = (where, e) => console.error('[RR.Game] ' + where + ':', e);
   const settings = () => (RR.Save && RR.Save.data && RR.Save.data.settings) || {};
@@ -118,10 +131,28 @@
     if (fallback && fallback.bg && fallback.bg.setQuality) safe(() => fallback.bg.setQuality(s.quality || 'high'), 'fallback quality');
     const cl = document.body.classList;
     cl.toggle('reduced-motion', !!s.reducedMotion);
-    cl.remove('q-low', 'q-medium', 'q-high');
-    cl.add('q-' + (s.quality || 'high'));
+    cl.toggle('q-auto', s.quality === 'auto');
+    applyQualityClass(renderer && renderer.quality ? renderer.quality : (s.quality === 'auto' ? 'high' : s.quality || 'high'));
     updateTouchVisibility();
     needsRender = true;
+  }
+
+  // body.q-* follows the quality actually rendered ('auto' may step it down), so the CSS drops the
+  // backdrop blur together with the canvas quality.
+  function applyQualityClass(q) {
+    const cl = document.body.classList;
+    const want = 'q-' + (q === 'low' || q === 'medium' ? q : 'high');
+    if (cl.contains(want)) return;
+    cl.remove('q-low', 'q-medium', 'q-high');
+    cl.add(want);
+  }
+
+  // A fixed quality that is still slow at the lowest render scale: suggest a lower setting (once).
+  function checkQualityHint() {
+    if (qualityHintShown || !renderer || !renderer.suggestedQuality) return;
+    qualityHintShown = true;
+    const q = renderer.suggestedQuality === 'low' ? 'LOW' : 'MED';
+    toast('Running slowly on this device — try Graphics: ' + q + ' in Settings', 'info', 4200);
   }
 
   function updateTouchVisibility() {
@@ -145,17 +176,34 @@
     if (fallback && renderer) { fallback.cam.viewW = renderer.w; fallback.cam.viewH = renderer.h; }
   }
   function doResize() {
-    resizeTimer = 0;
-    if (!renderer) return;
-    safe(() => renderer.resize(), 'renderer.resize');
+    if (!renderer) return false;
+    const changed = !!safe(() => renderer.resize(), 'renderer.resize');
     syncViewports();
     menuTargetFor = '';
     needsRender = true;
     if (RR.UI && RR.UI.onResize) safe(() => RR.UI.onResize(), 'UI.onResize');
+    return changed;
   }
   function scheduleResize() {
     if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(doResize, 90);
+    resizeTimer = setTimeout(() => { resizeTimer = 0; doResize(); }, 90);
+  }
+  // ResizeObserver path: runs after this frame's rAF callback and before paint. Resizing the backing
+  // store clears the canvas, so the current frame is redrawn right away at the new size.
+  function onCanvasResize() {
+    if (!doResize()) return;
+    renderNow();
+  }
+  function renderNow() {
+    if (state === 'playing' && run) {
+      try { run.render(); } catch (e) { reportError(e, 'run.render'); }
+    } else if (state === 'menu') {
+      needsRender = false;
+      if (attract) { try { attract.render(); } catch (e) { attractErrors++; } } else drawFallback(0);
+    } else if (state !== 'boot') {
+      needsRender = false;
+      renderFrozen();
+    }
   }
 
   // ---------------------------------------------------------------- attract run (menu background)
@@ -172,6 +220,7 @@
       attract = new RR.Run({ worldId: d.selectedWorld, vehicleId: d.selectedVehicle, mode: 'attract', daily: null, renderer, onEnd: () => {} });
       applyRunQuality(attract);
       syncViewport(attract);
+      needsRender = true;
     } catch (e) {
       log('attract run', e);
       attract = null;
@@ -283,6 +332,8 @@
     }
     destroyRun();
     destroyAttract();
+    // missions roll over at midnight on their own; this just makes the first track() of the run cheap
+    if (RR.Missions && RR.Missions.ensureToday) safe(() => RR.Missions.ensureToday(), 'Missions.ensureToday');
     let r = null;
     try {
       r = new RR.Run({
@@ -337,24 +388,40 @@
     return true;
   }
 
+  // Apply a finished run's rewards (coins, XP, records, stats) and, for a daily run, record the attempt
+  // against the challenge the run was STARTED for (a run that ends after midnight is expired, never
+  // credited to the new day's challenge). Callers guarantee once-per-run through runEnded.
+  function bankRun(summary) {
+    let rewards = null;
+    let dailyResult = null;
+    if (!summary) return { rewards, dailyResult };
+    try { rewards = RR.Progression.applyRunResults(summary); } catch (e) { reportError(e, 'applyRunResults'); }
+    const daily = lastParams && lastParams.daily;
+    if (summary.mode === 'daily' || daily) {
+      const day = summary.dailyDay || (daily && daily.day) || undefined;
+      try { dailyResult = RR.Daily.recordAttempt(summary.distance, day); } catch (e) { reportError(e, 'Daily.recordAttempt'); }
+    }
+    return { rewards, dailyResult };
+  }
+
+  function fallbackSummary() {
+    return { worldId: lastParams && lastParams.worldId, vehicleId: lastParams && lastParams.vehicleId, mode: lastParams && lastParams.daily ? 'daily' : 'normal',
+      distance: 0, coins: 0, endReason: 'quit', dailyDay: lastParams && lastParams.daily ? lastParams.daily.day || null : null };
+  }
+
   function endRun(summary) {
     if (runEnded || !run) return;                              // exactly once per run
     runEnded = true;
     const r = run;
     if (!summary && r && typeof r.getSummary === 'function') summary = safe(() => r.getSummary(), 'run.getSummary');
-    summary = summary || { worldId: lastParams && lastParams.worldId, vehicleId: lastParams && lastParams.vehicleId, mode: lastParams && lastParams.daily ? 'daily' : 'normal', distance: 0, coins: 0, endReason: 'quit' };
-    let rewards = null;
-    let dailyResult = null;
-    try { rewards = RR.Progression.applyRunResults(summary); } catch (e) { reportError(e, 'applyRunResults'); }
-    if (summary.mode === 'daily' || (lastParams && lastParams.daily)) {
-      try { dailyResult = RR.Daily.recordAttempt(summary.distance); } catch (e) { reportError(e, 'Daily.recordAttempt'); }
-    }
+    summary = summary || fallbackSummary();
+    const { rewards, dailyResult } = bankRun(summary);
     setState('results');
     needsRender = true;
     if (RR.Input) { RR.Input.setActive(false); RR.Input.reset(); }
     if (RR.HUD) RR.HUD.show(false);
     if (RR.Audio) safe(() => { RR.Audio.engineStop(); RR.Audio.duck(true); }, 'audio end');
-    if (RR.UI) RR.UI.showResults(summary, rewards, dailyResult);
+    if (RR.UI) RR.UI.showResults(summary, rewards, dailyResult, lastParams && lastParams.daily);
   }
 
   function pause() {
@@ -387,9 +454,38 @@
     return true;
   }
 
+  // Bank the live run (R / pause RESTART mid-run, also on the CRASHED stamp and while coasting out of
+  // fuel): the run ends through run.quit() (keeps crash / fuel as the end reason and flushes its mission
+  // distance) with runEnded already set, so its onEnd → endRun is ignored and no results screen shows.
+  function bankLiveRun() {
+    const r = run;
+    if (!r || runEnded || (state !== 'playing' && state !== 'paused')) return null;
+    runEnded = true;
+    safe(() => { if (typeof r.quit === 'function') r.quit(); }, 'run.quit');
+    let s = safe(() => (typeof r.getSummary === 'function' ? r.getSummary() : null), 'run.getSummary');
+    if (!s || typeof s !== 'object') s = fallbackSummary();
+    if (!s.endReason) s.endReason = r.state === 'crashed' ? 'crash' : r.state === 'nofuel' ? 'fuel' : 'quit';
+    // an empty run (restarted before it went anywhere) has nothing to keep — don't count it as a run
+    const empty = Math.floor(Number(s.distance) || 0) <= 0 && !((s.coins | 0) + (s.bonusCoins | 0) + (s.tokens | 0));
+    if (empty) return null;
+    const res = bankRun(s);
+    const rw = res.rewards;
+    if (rw && !rw.ignored) {
+      const U = RR.Util;
+      const parts = [];
+      if (rw.totalCoins > 0) parts.push('+' + U.formatInt(rw.totalCoins) + ' coins banked');
+      const dist = Math.floor(Number(s.distance) || 0);
+      if (rw.newWorldRecord && (rw.previousBest || 0) >= 50) parts.push('new best ' + U.formatInt(dist) + ' m');
+      else if (rw.newDailyBest) parts.push('best today ' + U.formatInt(dist) + ' m');
+      if (parts.length) toast(parts.join(' · '), 'reward', 2600);
+    }
+    return res;
+  }
+
   function restart() {
     if (!lastParams) return false;
     if (state !== 'playing' && state !== 'paused' && state !== 'results' && state !== 'tutorial') return false;
+    bankLiveRun();
     const p = { worldId: lastParams.worldId, vehicleId: lastParams.vehicleId, daily: null };
     if (lastParams.daily) {
       // same day → same challenge; after midnight the retry plays the new day's challenge
@@ -406,13 +502,13 @@
     if (!runEnded && run === r) {
       // Run may end on its next update; end right away with its summary (onEnd later is ignored).
       let summary = safe(() => (typeof r.getSummary === 'function' ? r.getSummary() : null), 'run.getSummary');
-      if (summary && typeof summary === 'object') summary.endReason = 'quit';
+      if (summary && typeof summary === 'object' && !summary.endReason) summary.endReason = 'quit';
       endRun(summary);
     }
     return true;
   }
 
-  function quitToMenu(screenId) {
+  function quitToMenu(screenId, params) {
     destroyRun();
     setState('menu');
     if (RR.Input) { RR.Input.setActive(false); RR.Input.reset(); }
@@ -421,8 +517,10 @@
     setMusic('menu');
     startAttract();
     lastTs = 0;
-    if (RR.UI) RR.UI.show(screenId || 'menu');
+    if (RR.UI) RR.UI.show(screenId || 'menu', params);
   }
+
+  function requestRender() { needsRender = true; }
 
   function toggleMute() {
     const s = settings();
@@ -464,7 +562,8 @@
           }
         }
         if (run !== r) return;                                   // restarted / quit inside update
-        try { r.render(); } catch (e) { reportError(e, 'run.render'); }
+        try { r.render(); fullFrame = true; } catch (e) { reportError(e, 'run.render'); }
+        checkQualityHint();
         if (state === 'playing' && RR.HUD) RR.HUD.update(r, dt);
         break;
       }
@@ -473,21 +572,30 @@
       case 'results':
         if (needsRender) { needsRender = false; renderFrozen(); }
         break;
-      case 'menu':
+      case 'menu': {
+        // Full-rate attract drive only behind the title screen. The other menu screens are opaque,
+        // blurred panels: the attract freezes there and is redrawn only when something changed
+        // (screen switch, resize, settings, new attract run) — no per-frame sim, draw or blur recompute.
+        const scr = RR.UI ? RR.UI.current : 'menu';
+        if (scr !== menuScreenSeen) { menuScreenSeen = scr; needsRender = true; }
+        const live = scr === 'menu' || !scr;
+        if (!live && !needsRender) break;
+        needsRender = false;
         if (attract) {
           try {
-            attract.update(dt);
-            frameMenuCamera(attract, dt);
+            if (live) { attract.update(dt); frameMenuCamera(attract, dt); }
             attract.render();
+            if (live) fullFrame = true;
           } catch (e) {
             attractErrors++;
             if (attractErrors === 1) log('attract', e);
             if (attractErrors >= ATTRACT_ERROR_LIMIT) destroyAttract();
           }
         } else {
-          drawFallback(dt);
+          drawFallback(live ? dt : 0);
         }
         break;
+      }
       default:
         break;
     }
@@ -496,12 +604,19 @@
   function loop(ts) {
     rafId = requestAnimationFrame(loop);                       // schedule first: an exception can't stop the loop
     const now = typeof ts === 'number' && ts > 0 ? ts : (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const rawMs = lastTs ? now - lastTs : 0;
     let dt = lastTs ? (now - lastTs) / 1000 : 1 / 60;
     lastTs = now;
     if (!(dt > 0)) dt = 0;
     if (dt > MAX_DT) dt = MAX_DT;
     frame++;
+    fullFrame = false;
     try { step(dt); } catch (e) { reportError(e, 'frame'); }
+    // Dynamic resolution: feed the real presented-frame interval of continuously drawn frames only
+    // (frozen / on-demand frames would read as fast and make the ladder step back up).
+    if (fullFrame && rawMs > 0 && renderer && typeof renderer.reportFrameTime === 'function') {
+      safe(() => renderer.reportFrameTime(rawMs), 'renderer.reportFrameTime');
+    }
     if (RR.UI) { try { RR.UI.update(dt); } catch (e) { reportError(e, 'UI.update'); } }
   }
 
@@ -534,7 +649,7 @@
     window.addEventListener('orientationchange', () => { scheduleResize(); setTimeout(doResize, 350); });
     if (window.visualViewport && window.visualViewport.addEventListener) window.visualViewport.addEventListener('resize', scheduleResize);
     if (typeof ResizeObserver === 'function' && canvas) {
-      try { new ResizeObserver(scheduleResize).observe(canvas); } catch (e) { /* optional */ }
+      try { new ResizeObserver(onCanvasResize).observe(canvas); } catch (e) { /* optional */ }
     }
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -580,6 +695,7 @@
     if (RR.Input) RR.Input.init();
     if (RR.Renderer && canvas) {
       try { renderer = new RR.Renderer(canvas); } catch (e) { log('Renderer', e); renderer = null; }
+      if (renderer) renderer.onQualityHint = (q) => { applyQualityClass(q); };
     }
     if (RR.HUD) safe(() => RR.HUD.init(), 'HUD.init');
     if (RR.UI) safe(() => RR.UI.init(Game), 'UI.init');
@@ -610,7 +726,8 @@
     quitToMenu,
     refreshAttract,
     toggleMute,
-    applySettings
+    applySettings,
+    requestRender
   };
   Object.defineProperties(Game, {
     state: { get: () => state, enumerable: true },

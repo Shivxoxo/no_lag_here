@@ -5,10 +5,23 @@
  * All state lives in RR.Save.data; every mutating call saves (batched where several happen at once).
  *
  * Decisions (documented):
- *  - Daily-challenge runs (mode 'daily') count toward the world's best distance and the overall best
- *    like normal runs (the in-run BEST flag uses the world best, so they stay consistent). The daily
- *    challenge keeps its own best in RR.Save.data.daily (RR.Daily.recordAttempt, called by the shell).
+ *  - Daily-challenge runs (mode 'daily') NEVER touch the permanent world / overall bests and pay no
+ *    record XP: their modifiers (gravity, speed, hills…) would otherwise set a bar normal runs can't
+ *    reach, and the daily world may not even be unlocked. They still pay coins / XP and count in the
+ *    stats. The daily keeps its own best in RR.Save.data.daily (RR.Daily.recordAttempt, called by the
+ *    Game after applyRunResults); rewards carry {dailyBestPrev, newDailyBest} for the results screen.
  *  - Best distances are stored as whole meters; a run is a record when floor(distance) > best.
+ *  - Run XP (review pacing pass): distance/10 + pickup coins/25 (bonus coins are trick coins and are
+ *    already paid through trick XP) + 50 % of the run's trick XP, capped at 1.5 × the distance XP (tricks
+ *    are a bonus on top of driving, not a farm) + boss XP + record XP = min(250, 0.5 × metres beyond the
+ *    previous world best) for runs ≥ 100 m that beat a previous best of ≥ 50 m (a world's first run
+ *    pays none, matching the in-run banner's RECORD_MIN_PREV).
+ *  - XP curve (pacing pass): xpForLevel(l) = round(150·l^1.55 / 10)·10 (was 200·l^1.4) — see
+ *    tests/progression.test.js for the measured pacing targets.
+ *  - Level rewards run to level 50: unlocks from the data files, upgrade tiers, paints (every 2 levels
+ *    up to 32, then every 4 up to 40), a coin chest (1,500 + 100·level coins) on every level ≥ 17 that
+ *    has no other reward, and +1 token on levels 20, 25, … 50. Coin / token rewards are paid by addXp.
+ *  - Tokens keep a use once every vehicle is owned: convertTokens(n) pays tokenValue() coins each.
  *  - stats.doubleFlips counts double + triple flips; stats.longestAir uses summary.longestAir when
  *    provided, else summary.airTime (the RunSummary field of the contract).
  *  - Progression plays no sounds; the UI reacts to the Bus events (levelup, coins, upgrade, unlock…).
@@ -23,6 +36,13 @@
  *  - COSMETICS entries also carry {desc}; isPaintUnlocked(paintId); selectedPaint(vehicleId) → paintId.
  *  - batch(fn): runs fn with saving deferred to a single write at the end (used by Missions/Daily).
  *  - applyRunResults() on an ignored run (attract / invalid) returns zeroed rewards with ignored:true.
+ *  - rewardsForLevel() entries may also be {type:'coins', amount, text} / {type:'tokens', amount, text}.
+ *  - computeRunRewards()/applyRunResults() also return {dailyBestPrev, newDailyBest} (0/false for
+ *    normal runs). summary.dailyDay ('YYYY-MM-DD', the day the daily run was started for) is used when
+ *    present; a daily run from an expired day never counts as a new daily best.
+ *  - tokenSinkStatus() → {available, reason:''|'vehicles'|'tokens', tokens, value};
+ *    tokenValue() → coins per token; convertTokens(n?) → {ok, reason, tokens, coins} (n defaults to
+ *    all tokens; emits 'coins', 'tokens' and 'wallet' {coins, tokens}).
  */
 (function () {
   'use strict';
@@ -33,8 +53,17 @@
   const MAX_COINS = 999999999;
   const MAX_TOKENS = 9999;
   const MAX_XP = 999999999;
-  const RECORD_XP = 250;
+  const RECORD_XP = 250;          // cap of the record bonus
+  const RECORD_XP_PER_M = 0.5;     // record XP per metre beyond the previous best
   const RECORD_MIN_DISTANCE = 100;
+  const RECORD_MIN_PREV = 50;      // like the in-run banner: beating a < 50 m best is not a record
+  const DIST_XP_DIV = 10;          // 1 XP per 10 m
+  const COIN_XP_DIV = 25;          // 1 XP per 25 pickup coins
+  const TRICK_XP_SHARE = 0.5;      // share of the run's trick XP that is paid
+  const TRICK_XP_CAP = 1.5;        // trick XP ≤ this × distance XP
+  const CHEST_MIN_LEVEL = 17;      // coin chests on reward-less levels from here on
+  const TOKEN_LEVEL_STEP = 5;      // +1 token on levels 20, 25, … 50
+  const TOKEN_LEVEL_FROM = 20;
 
   const S = () => {
     if (!RR.Save.data) RR.Save.load();
@@ -67,10 +96,11 @@
   }
 
   // ---------------------------------------------------------------- XP curve
-  // XP needed to go from `level` to `level + 1` (contract formula).
+  // XP needed to go from `level` to `level + 1` (pacing pass: 150·l^1.55, level 2 costs 150 XP).
+  // js/core/save.js mirrors this formula in its load-order fallback — keep them identical.
   function xpForLevel(level) {
     const l = U.clamp(Math.floor(U.safeNum(level, 1)), 1, MAX_LEVEL);
-    return Math.round(200 * Math.pow(l, 1.4) / 10) * 10;
+    return Math.round(150 * Math.pow(l, 1.55) / 10) * 10;
   }
   // CUM[l] = total XP required to reach level l (CUM[1] = 0).
   const CUM = new Array(MAX_LEVEL + 1).fill(0);
@@ -122,12 +152,24 @@
       { body: '#1a0b2e', accent: '#ff2bd6', trim: '#3ff3ff', wheel: '#0b0714', rim: '#3ff3ff' }),
     paint('paint_chrome', 'Chrome', 18, 'Mirror-polished steel. Blinding in the sun.',
       { body: '#c9d1d9', accent: '#f5f7fa', trim: '#6b7580', wheel: '#1f2328', rim: '#ffffff' }),
+    paint('paint_sandstorm', 'Sandstorm', 20, 'Dune tan scoured by rust-red wind streaks.',
+      { body: '#c8a46a', accent: '#b5451b', trim: '#4a3217', wheel: '#1f1810', rim: '#f0d9a8' }),
     paint('paint_storm', 'Thunderhead', 22, 'Storm grey split by a lightning-yellow stripe.',
       { body: '#4a5566', accent: '#ffe23a', trim: '#232a33', wheel: '#15181d', rim: '#aab6c6' }),
+    paint('paint_toxic', 'Toxic', 24, 'Acid green on hazard black. Keep away from open flames.',
+      { body: '#1b1f16', accent: '#9dff1f', trim: '#4d7a0a', wheel: '#0d0f0a', rim: '#d4ff7a' }),
     paint('paint_gold', 'Gold Rush', 26, 'Solid gold for the true mountain master.',
       { body: '#d4a017', accent: '#fff1a8', trim: '#6b4f08', wheel: '#241c08', rim: '#ffe066' }),
+    paint('paint_sakura', 'Sakura', 28, 'Blossom pink over deep plum, for a calm ride up the steepest climbs.',
+      { body: '#f7b7cf', accent: '#7b2150', trim: '#3d1028', wheel: '#1e0c16', rim: '#fff0f5' }),
     paint('paint_cosmic', 'Cosmic', 30, 'A starfield of deep purple and nebula blue.',
-      { body: '#2d1b69', accent: '#5ee7ff', trim: '#f7c8ff', wheel: '#120b24', rim: '#b8a7ff' })
+      { body: '#2d1b69', accent: '#5ee7ff', trim: '#f7c8ff', wheel: '#120b24', rim: '#b8a7ff' }),
+    paint('paint_abyss', 'Abyss', 32, 'Deep-sea black with bioluminescent cyan seams.',
+      { body: '#08222b', accent: '#2ef2d0', trim: '#04121a', wheel: '#030a0e', rim: '#8ff7ff' }),
+    paint('paint_royal', 'Royal', 36, 'Imperial violet trimmed in burnished gold.',
+      { body: '#4b1d7a', accent: '#e8b53a', trim: '#26093f', wheel: '#140621', rim: '#ffd97a' }),
+    paint('paint_obsidian', 'Obsidian', 40, 'Volcanic glass with a violet-fire sheen. Only for legends.',
+      { body: '#0c0b10', accent: '#b04cff', trim: '#ff6a2b', wheel: '#050407', rim: '#d9b8ff' })
   ]);
   const cosmeticById = new Map(COSMETICS.map((c) => [c.id, c]));
   const FALLBACK_COLORS = Object.freeze({ body: '#f2a007', accent: '#e8412c', trim: '#2b2f36', wheel: '#1d1f24', rim: '#d9dde3' });
@@ -188,8 +230,19 @@
     for (const p of COSMETICS) {
       if (p.level > 1 && p.level <= MAX_LEVEL) map[p.level].push({ type: 'cosmetic', id: p.id, text: 'New paint job: ' + p.name });
     }
+    // Late levels always give something: a coin chest where nothing else unlocks, a token every 5.
+    for (let l = CHEST_MIN_LEVEL; l <= MAX_LEVEL; l++) {
+      if (!map[l].length) {
+        const amount = chestCoins(l);
+        map[l].push({ type: 'coins', amount, text: 'Coin chest: +' + U.formatInt(amount) + ' coins' });
+      }
+      if (l >= TOKEN_LEVEL_FROM && (l - TOKEN_LEVEL_FROM) % TOKEN_LEVEL_STEP === 0) {
+        map[l].push({ type: 'tokens', amount: 1, text: '+1 unlock token' });
+      }
+    }
     return map;
   }
+  function chestCoins(level) { return 1500 + 100 * level; }
   function levelRewards() {
     // Rebuilt until both catalogues are present (they load after this file in some test setups).
     if (!levelRewardsCache || !levelRewardsCache.complete) {
@@ -250,13 +303,20 @@
     const after = levelInfo(d.xp).level;
     d.level = after;
     const all = [];
-    for (let l = before + 1; l <= after; l++) {
-      unlockLevelCosmetics(l);
-      const rewards = rewardsForLevel(l);
-      for (const r of rewards) all.push(r);
-      emit('levelup', { level: l, rewards });
-    }
-    if (add > 0) persist();
+    const grant = () => {
+      for (let l = before + 1; l <= after; l++) {
+        unlockLevelCosmetics(l);
+        const rewards = rewardsForLevel(l);
+        for (const r of rewards) {
+          if (r.type === 'coins') addCoins(r.amount);
+          else if (r.type === 'tokens') addTokens(r.amount);
+          all.push(r);
+        }
+        emit('levelup', { level: l, rewards });
+      }
+      if (add > 0) persist();
+    };
+    if (after > before) batch(grant); else grant();
     return { levelsGained: after - before, level: after, rewards: all };
   }
 
@@ -405,10 +465,21 @@
     return {
       coins: 0, bonusCoins: 0, totalCoins: 0, tokens: 0,
       xp: { distance: 0, coins: 0, tricks: 0, boss: 0, record: 0, total: 0 },
-      newRecord: false, newWorldRecord: false, previousBest: previousBest || 0
+      newRecord: false, newWorldRecord: false, previousBest: previousBest || 0,
+      dailyBestPrev: 0, newDailyBest: false
     };
   }
   const isRewardable = (s) => s !== null && typeof s === 'object' && s.mode !== 'attract';
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  // The daily state a daily run is measured against, read WITHOUT rolling the save over.
+  function dailyContext(summary) {
+    const today = U.todayKey();
+    const runDay = typeof summary.dailyDay === 'string' && DAY_RE.test(summary.dailyDay) ? summary.dailyDay : today;
+    const st = S().daily;
+    const best = st && st.day === runDay ? Math.floor(num0(st.best, 1e7)) : 0;
+    return { best, expired: runDay !== today };
+  }
 
   function computeRunRewards(summary) {
     const d = S();
@@ -416,23 +487,32 @@
     const previousBest = worldId ? (d.bestDistances[worldId] || 0) : 0;
     if (!isRewardable(summary)) return zeroRewards(previousBest);
 
+    const daily = summary.mode === 'daily';
     const distance = Math.floor(num0(summary.distance, 1e7));
     const coins = Math.floor(num0(summary.coins, 1e7));
     const bonusCoins = Math.floor(num0(summary.bonusCoins, 1e7));
     const totalCoins = coins + bonusCoins;
     const tokens = Math.floor(num0(summary.tokens, 10));
-    const newWorldRecord = !!worldId && distance > previousBest;
-    const newRecord = distance > d.bestDistance;
+    const newWorldRecord = !daily && !!worldId && distance > previousBest;
+    const newRecord = !daily && distance > d.bestDistance;
+    const distXp = Math.floor(distance / DIST_XP_DIV);
     const xp = {
-      distance: Math.floor(distance / 10),
-      coins: Math.floor(totalCoins / 25),
-      tricks: Math.floor(num0(summary.trickXp, 1e6)),
+      distance: distXp,
+      coins: Math.floor(coins / COIN_XP_DIV),
+      tricks: Math.min(Math.floor(num0(summary.trickXp, 1e6) * TRICK_XP_SHARE), Math.floor(distXp * TRICK_XP_CAP)),
       boss: Math.floor(num0(summary.bossXp, 1e6)),
-      record: newWorldRecord && distance >= RECORD_MIN_DISTANCE ? RECORD_XP : 0,
+      record: newWorldRecord && previousBest >= RECORD_MIN_PREV && distance >= RECORD_MIN_DISTANCE
+        ? Math.min(RECORD_XP, Math.floor(RECORD_XP_PER_M * (distance - previousBest))) : 0,
       total: 0
     };
     xp.total = xp.distance + xp.coins + xp.tricks + xp.boss + xp.record;
-    return { coins, bonusCoins, totalCoins, tokens, xp, newRecord, newWorldRecord, previousBest };
+    let dailyBestPrev = 0, newDailyBest = false;
+    if (daily) {
+      const dc = dailyContext(summary);
+      dailyBestPrev = dc.best;
+      newDailyBest = !dc.expired && distance > dc.best;
+    }
+    return { coins, bonusCoins, totalCoins, tokens, xp, newRecord, newWorldRecord, previousBest, dailyBestPrev, newDailyBest };
   }
 
   function applyRunResults(summary) {
@@ -448,8 +528,10 @@
       addCoins(rewards.totalCoins);
       addTokens(rewards.tokens);
 
+      // Daily runs never write the permanent bests (see the header); computeRunRewards already
+      // reports no record for them.
       if (rewards.newWorldRecord) d.bestDistances[summary.worldId] = distance;
-      if (distance > d.bestDistance) d.bestDistance = distance;
+      if (rewards.newRecord) d.bestDistance = distance;
 
       const st = d.stats;
       const tr = summary.tricks && typeof summary.tricks === 'object' ? summary.tricks : {};
@@ -476,6 +558,34 @@
     });
   }
 
+  // ---------------------------------------------------------------- token sink
+  // Once every vehicle is owned, tokens convert to coins (they would be dead currency otherwise).
+  const tokenValue = () => 1500 + 50 * U.clamp(S().level | 0, 1, MAX_LEVEL);
+  function allVehiclesOwned() {
+    const list = RR.Vehicles ? RR.Vehicles.list : [];
+    const owned = S().unlockedVehicles;
+    return list.length > 0 && list.every((v) => owned.indexOf(v.id) >= 0);
+  }
+  function tokenSinkStatus() {
+    const tokens = S().tokens;
+    const reason = !allVehiclesOwned() ? 'vehicles' : tokens <= 0 ? 'tokens' : '';
+    return { available: reason === '', reason, tokens, value: tokenValue() };
+  }
+  function convertTokens(n) {
+    const st = tokenSinkStatus();
+    const want = n === undefined ? st.tokens : (typeof n === 'number' && Number.isFinite(n) ? Math.floor(n) : 0);
+    if (st.reason === 'vehicles') return { ok: false, reason: 'vehicles', tokens: 0, coins: 0 };
+    if (want <= 0 || want > st.tokens) return { ok: false, reason: 'tokens', tokens: 0, coins: 0 };
+    return batch(() => {
+      if (!spendTokens(want)) return { ok: false, reason: 'tokens', tokens: 0, coins: 0 };
+      const coins = want * st.value;
+      addCoins(coins);
+      emit('wallet', { coins: S().coins, tokens: S().tokens });
+      persist();
+      return { ok: true, reason: '', tokens: want, coins };
+    });
+  }
+
   // ---------------------------------------------------------------- export
   const Progression = {
     MAX_LEVEL,
@@ -486,6 +596,7 @@
     vehicleStatus, unlockVehicle, worldStatus, unlockWorld, selectVehicle, selectWorld,
     getPaint, selectPaint, isPaintUnlocked, selectedPaint,
     rewardsForLevel, computeRunRewards, applyRunResults,
+    tokenSinkStatus, tokenValue, convertTokens,
     batch
   };
   Object.defineProperty(Progression, 'LEVEL_REWARDS', { enumerable: true, get: levelRewards });

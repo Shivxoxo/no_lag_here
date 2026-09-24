@@ -9,10 +9,14 @@
  *          AIR ROTATE RIGHT (lean forward ↻); SPECIAL above GAS for vehicles that have one.
  *          Pointer events with per-pointer tracking + setPointerCapture; every press is released on
  *          pointerup / pointercancel / lostpointercapture, and everything on window blur / tab hide.
+ *          A thumb that slides from one pedal onto another hands the press over (GAS → TILT releases GAS
+ *          and holds TILT; the capture moves with it); sliding onto empty space keeps the current press.
  *
  * Keyboard and touch work at the same time: each source keeps its own state and they are OR-ed.
  * preventDefault is applied only to game keys and only while the game is active (setActive(true)),
- * so menus keep normal keyboard behaviour (Tab, Enter, arrows on sliders…).
+ * so menus keep normal keyboard behaviour (Tab, Enter, arrows on sliders…). While active, Tab is
+ * swallowed too: nothing in the run is focusable, so it would only move focus out of the page (→ window
+ * blur → auto-pause).
  *
  * Contract additions (documented, never renames):
  *  - Event payloads: 'pause' / 'restart' / 'mute' / 'special' receive {key, source:'keyboard'|'touch'}
@@ -137,6 +141,7 @@
     if (e.key !== 'Escape' && !e.ctrlKey && !e.metaKey && !e.altKey) gesture();
     if (e.ctrlKey || e.metaKey || e.altKey) return;          // never hijack browser shortcuts
     const editable = isEditable(e.target);
+    if (active && !editable && (e.key === 'Tab' || e.code === 'Tab')) { e.preventDefault(); return; }
     const action = actionFor(e);
     const command = commandFor(e);
 
@@ -217,6 +222,30 @@
     if (!held) p.el.classList.remove('pressed');
   }
 
+  // Pointer moved while holding a pedal (events arrive on the capturing button): hand the press over
+  // to the pedal now under the finger. Empty space keeps the current press; SPECIAL (a one-shot boost)
+  // is never entered by sliding.
+  function slidePointer(e) {
+    const p = pointers.get(e.pointerId);
+    if (!p || !root) return;
+    let hit = null;
+    try {
+      const t = document.elementFromPoint(e.clientX, e.clientY);
+      hit = t && t.closest ? t.closest('.tc-btn') : null;
+    } catch (err) { hit = null; }
+    if (!hit || hit === p.el || !root.contains(hit)) return;
+    const action = hit.getAttribute('data-tc');
+    if (!action || action === 'special' || !(action in touchCount)) return;
+    releasePointer(e.pointerId);
+    pointers.set(e.pointerId, { action, el: hit });
+    touchCount[action] += 1;
+    recompute();
+    hit.classList.add('pressed');
+    vibrate(8);
+    // move the capture along (the old button's lostpointercapture is ignored: it no longer owns it)
+    try { if (hit.setPointerCapture) hit.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported */ }
+  }
+
   function releaseAllTouch() {
     for (const id of Array.from(pointers.keys())) releasePointer(id);
     for (const a of ACTIONS) touchCount[a] = 0;
@@ -258,7 +287,12 @@
       const up = (e) => releasePointer(e.pointerId);
       el.addEventListener('pointerup', up);
       el.addEventListener('pointercancel', up);
-      el.addEventListener('lostpointercapture', up);
+      // only release when this button still owns the pointer (a slide moved the capture elsewhere)
+      el.addEventListener('lostpointercapture', (e) => {
+        const p = pointers.get(e.pointerId);
+        if (p && p.el === el) releasePointer(e.pointerId);
+      });
+      el.addEventListener('pointermove', slidePointer);
       el.addEventListener('contextmenu', (e) => e.preventDefault());
     }
     // Stop long-press callouts / double-tap zoom anywhere on the control layer.

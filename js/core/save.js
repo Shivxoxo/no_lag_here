@@ -21,6 +21,12 @@
  *  - RR.Save.upgradeCategories() → ['engine', ..., 'brakes'] (live from RR.Vehicles when present).
  *  - save() returns true when the data was stored (localStorage, or the in-memory fallback when
  *    localStorage is unavailable); false only when a real localStorage write failed (e.g. quota).
+ *  - Write failures are not silent: when a localStorage write throws, the backup key is dropped (it
+ *    doubles the footprint) and the write retried once; if it still fails the data is kept in memory,
+ *    RR.Save.persistent = false, RR.Save.lastError = 'quota' | 'blocked', and Bus 'saveError' {reason}
+ *    is emitted (once per session). The next successful write restores persistent = true (lastError
+ *    null). When load() finds no usable localStorage at all, 'saveError' {reason:'unavailable'} is
+ *    emitted once on the next tick (after the UI has subscribed).
  *  - load() and save() update RR.Save.data IN PLACE (same object identity, nested objects/arrays
  *    patched where possible), so references held by other modules never go stale.
  */
@@ -60,7 +66,7 @@
   const INT_STATS = new Set(['runs', 'coinsCollected', 'backflips', 'frontflips', 'doubleFlips', 'perfectLandings',
     'fuelCollected', 'powerups', 'crashes', 'bossesCleared', 'maxCombo', 'missionsCompleted', 'dailyCompleted']);
 
-  const QUALITIES = ['low', 'medium', 'high'];
+  const QUALITIES = ['low', 'medium', 'high', 'auto']; // 'auto' = HIGH + renderer steps quality down on slow devices
   const TOUCH_MODES = ['auto', 'on', 'off'];
   const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -126,7 +132,7 @@
     }
     let level = 1, rest = xp;
     while (level < 50) {
-      const need = Math.round(200 * Math.pow(level, 1.4) / 10) * 10;
+      const need = Math.round(150 * Math.pow(level, 1.55) / 10) * 10; // = RR.Progression.xpForLevel
       if (rest < need) break;
       rest -= need;
       level++;
@@ -385,6 +391,14 @@
   }
   const getStore = () => store || probeStorage();
 
+  // 'saveError' is announced at most once per session (the UI shows one toast).
+  let errorAnnounced = false;
+  function announceError(reason) {
+    if (errorAnnounced) return;
+    errorAnnounced = true;
+    if (RR.Bus) RR.Bus.emit('saveError', { reason });
+  }
+
   function readRaw(key) {
     try {
       return getStore().getItem(key);
@@ -414,6 +428,7 @@
     recovered: false,
     restoredFromBackup: false,
     persistent: true,
+    lastError: null,
 
     defaults,
     sanitize,
@@ -443,6 +458,10 @@
       }
       syncInPlace(Save.data, clean);
       if (Save.restoredFromBackup) Save.save(); // repair the primary key
+      if (!Save.persistent && store === memory) {
+        Save.lastError = 'unavailable';
+        setTimeout(() => announceError('unavailable'), 0); // after UI init has subscribed
+      }
       return Save.data;
     },
 
@@ -456,12 +475,30 @@
         return false;
       }
       const s = getStore();
+      if (s === memory) { memory.setItem(KEY, json); return true; }
       try {
         s.setItem(KEY, json);
       } catch (e) {
-        memory.setItem(KEY, json);
-        return s === memory;
+        // Quota: the backup copy doubles our footprint — drop it and retry once.
+        let err = e;
+        try {
+          s.removeItem(BACKUP_KEY);
+          s.setItem(KEY, json);
+          err = null;
+        } catch (e2) { err = e2; }
+        if (err) {
+          memory.setItem(KEY, json); // the session keeps working on the in-memory copy
+          Save.persistent = false;
+          Save.lastError = err && (err.name === 'QuotaExceededError' || err.code === 22 || err.code === 1014) ? 'quota' : 'blocked';
+          announceError(Save.lastError);
+          return false;
+        }
+        Save.persistent = true;
+        Save.lastError = null;
+        return true; // primary stored; no room for a backup this time
       }
+      Save.persistent = true;
+      Save.lastError = null;
       try { s.setItem(BACKUP_KEY, json); } catch (e) { /* primary is fine; backup is best-effort */ }
       return true;
     },

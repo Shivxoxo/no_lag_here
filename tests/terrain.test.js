@@ -155,7 +155,7 @@ function slopeK(rec, k) { return (rec.hs[k] - rec.hs[k - 1]) / DX; }
 
 function analyse(rec) {
   const t = rec.t;
-  const out = { maxOrganic: 0, maxDesignUp: 0, maxBoss: 0, maxTrenchUp: 0, nanCount: 0, recorded: 0 };
+  const out = { maxOrganic: 0, maxDesignUp: 0, maxBoss: 0, maxTrenchUp: 0, maxWall: 0, nanCount: 0, recorded: 0 };
   for (let k = 1; k < rec.hs.length; k++) {
     if (!Number.isFinite(rec.hs[k]) || !Number.isFinite(rec.hs[k - 1])) continue;
     out.recorded++;
@@ -163,6 +163,7 @@ function analyse(rec) {
     if (fl & F.DESIGN) {
       if (fl & F.TRENCH) { if (s > out.maxTrenchUp) out.maxTrenchUp = s; } else if (s > out.maxDesignUp) out.maxDesignUp = s;
     } else if (fl & F.BOSS) out.maxBoss = Math.max(out.maxBoss, Math.abs(s));
+    else if (fl & F.WALL) out.maxWall = Math.max(out.maxWall, Math.abs(s));
     else out.maxOrganic = Math.max(out.maxOrganic, Math.abs(s) / t.maxSlopeAt((k + I0) * DX));
   }
   return out;
@@ -301,6 +302,8 @@ H.test('upcomingSection teaser & SectionInfo shape', () => {
   const b = t.upcomingSection(2900);
   H.assert(b && b.id === 'boss' && b.start === 3000 && b.tier === 1 && b.name === 'BOSS RUN' &&
     b.bossName === 'THE MOUNTAIN GIANT' && b.summitX > b.start, 'boss teaser');
+  H.assert(Array.isArray(b.ledges) && b.ledges.length === 3 && b.ledges.every((L, i) => L.x > b.start && L.x2 > L.x &&
+    L.x2 < b.summitX && (i === 0 || L.x >= b.ledges[i - 1].x2)), 'boss teaser publishes sorted rest ledges {x, x2}');
   t.ensure(1200);
   const before = t.upcomingSection(0);
   H.assert(before.start === s.start, 'plan is stable');
@@ -310,7 +313,7 @@ H.test('upcomingSection teaser & SectionInfo shape', () => {
 H.test('drive 8 worlds × 5 seeds (moving ensure/trim window)', () => {
   const t0 = nowMs();
   for (const w of WORLDS) {
-    summary[w.id] = { counts: {}, maxOrganic: 0, maxDesignUp: 0, maxTrenchUp: 0, maxBoss: 0, maxV: 0, sections: '', decoGap: [] };
+    summary[w.id] = { counts: {}, maxOrganic: 0, maxDesignUp: 0, maxTrenchUp: 0, maxBoss: 0, maxWall: 0, maxV: 0, sections: '', decoGap: [] };
     for (const seed of SEEDS) {
       const rec = drive(w.id, seed, { cpPerStep: seed === SEEDS[0] ? 12 : 4 });
       rec.an = analyse(rec);
@@ -321,6 +324,7 @@ H.test('drive 8 worlds × 5 seeds (moving ensure/trim window)', () => {
       S.maxDesignUp = Math.max(S.maxDesignUp, rec.an.maxDesignUp);
       S.maxTrenchUp = Math.max(S.maxTrenchUp, rec.an.maxTrenchUp);
       S.maxBoss = Math.max(S.maxBoss, rec.an.maxBoss);
+      S.maxWall = Math.max(S.maxWall, rec.an.maxWall);
       S.maxV = Math.max(S.maxV, rec.jumps.maxV);
       if (seed === SEEDS[0]) {
         S.sections = Array.from(rec.sections.values()).map((s) => s.id + (s.tier ? s.tier : '') + '@' + Math.round(s.start)).join(' ');
@@ -346,13 +350,19 @@ H.test('validate(): slope limits, ramp spans, concave kinks, lava ramps, ceiling
   for (const rec of runs) H.assert(rec.problems.length === 0, rec.worldId + '/' + rec.seed + ': ' + rec.problems.slice(0, 5).join(' | '));
 });
 
+// Boss / wall slope caps: 1.25 (rock-equivalent) × the low-gravity factor, + tolerance.
+const gravF = (rec) => 1 + 0.18 * Math.max(0, 1 - RR.Worlds.byId(rec.worldId).gravity);
+const BOSS_MAX = (rec) => 1.25 * gravF(rec) + 0.06 + 1e-9;
+const WALL_MAX = (rec) => 1.25 * gravF(rec) + 0.04 + 1e-9;
+
 H.test('slopes ≤ maxSlope (+tol) outside flagged ramp spans; designed climbs ≤ 0.7; trench exits ≤ 0.62', () => {
   for (const rec of runs) {
     const a = rec.an;
     H.assert(a.maxOrganic <= 1 + 0.02 / 0.5, rec.worldId + '/' + rec.seed + ' organic slope ratio ' + fmt(a.maxOrganic, 3));
     H.assert(a.maxDesignUp <= 0.705, rec.worldId + '/' + rec.seed + ' designed climb ' + fmt(a.maxDesignUp, 3));
     H.assert(a.maxTrenchUp <= 0.62, rec.worldId + '/' + rec.seed + ' trench exit ' + fmt(a.maxTrenchUp, 3));
-    H.assert(a.maxBoss <= 0.87, rec.worldId + '/' + rec.seed + ' boss slope ' + fmt(a.maxBoss, 3));
+    H.assert(a.maxBoss <= BOSS_MAX(rec), rec.worldId + '/' + rec.seed + ' boss slope ' + fmt(a.maxBoss, 3));
+    H.assert(a.maxWall <= WALL_MAX(rec), rec.worldId + '/' + rec.seed + ' wall slope ' + fmt(a.maxWall, 3));
   }
 });
 
@@ -364,7 +374,7 @@ H.test('no wheel-trapping concave kinks (R ≥ 0.45 m everywhere, ≥ ~2.2 m on 
       const turn = a2 - a1;   // concave > 0; ~1 m of arc between chord midpoints
       if (turn <= 0) continue;
       let special = false;
-      for (let j = -2; j <= 2; j++) if (rec.fl[k + j] & (F.DESIGN | F.ROCKS)) special = true;
+      for (let j = -2; j <= 2; j++) if (rec.fl[k + j] & (F.DESIGN | F.ROCKS | F.WALL)) special = true;
       H.assert(1 / turn >= 0.45, rec.worldId + '/' + rec.seed + ' concave radius ' + fmt(1 / turn, 3) + ' m at x=' + ((k + I0) * DX));
       if (!special) H.assert(turn <= 0.45, rec.worldId + '/' + rec.seed + ' organic concave kink ' + fmt(turn, 3) + ' at x=' + ((k + I0) * DX));
     }
@@ -415,7 +425,10 @@ H.test('every gap / lava pool passes the ballistic check (≤ 16 m/s) with climb
       const k = idx(m.trenchX2);
       H.assert(rec.hs[k] <= m.takeoffY + 1e-9, f.type + ' landing rim above takeoff at ' + fmt(f.x));
       H.assert(m.vReq <= 16, f.type + ' vReq ' + fmt(m.vReq));
-      if (f.type === 'gap') H.assert(m.depth >= 2.95 && m.depth <= 6.05, 'gap depth ' + fmt(m.depth) + ' at ' + fmt(f.x));
+      if (f.type === 'gap' && m.boss) {
+        // the boss's small kicker gap (tier ≥ 2): shallow, short, clearable from its run-up ledge
+        H.assert(m.depth >= 0.9 && m.depth <= 2.6 && m.width <= 10 && m.vReq <= 10.5, 'boss gap ' + fmt(m.depth) + ' m deep, ' + fmt(m.width) + ' m wide, vReq ' + fmt(m.vReq) + ' at ' + fmt(f.x));
+      } else if (f.type === 'gap') H.assert(m.depth >= 2.95 && m.depth <= 6.05, 'gap depth ' + fmt(m.depth) + ' at ' + fmt(f.x));
       // exit wall of the trench is climbable (≤ ~31°): check the recorded samples between floor and rim
       for (let q = idx(m.takeoffX) + 1; q <= k; q++) if (rec.fl[q] & F.TRENCH) H.assert(slopeK(rec, q) <= 0.62, 'trench exit slope');
     }
@@ -439,63 +452,67 @@ H.test('lava only where allowed (world lava weight > 0 or volcano sections), alw
   }
 });
 
-H.test('boss sections at 3000/8000/13000… with rising, climbable slope, 3–5 rest ledges and a flat summit', () => {
+H.test('boss climbs at 3000/8000/13000…: rest ledges, rock garden, headwall crux, kicker gap from tier 2, flat summit', () => {
+  const heads = {};   // world → steepest 40 m average per tier (seed-aggregated max)
   for (const rec of runs) {
+    const w = RR.Worlds.byId(rec.worldId);
     const bosses = Array.from(rec.sections.values()).filter((s) => s.id === 'boss');
     const expected = [];
     for (let b = 3000; b + 600 < rec.dist; b += 5000) expected.push(b);
     H.assert(bosses.length >= expected.length, rec.worldId + '/' + rec.seed + ' boss count ' + bosses.length);
     expected.forEach((bx, n) => {
-      const b = bosses[n];
-      H.assert(b.start === bx && b.tier === n + 1, 'boss ' + (n + 1) + ' at ' + b.start + ' tier ' + b.tier);
-      H.assert(b.name === 'BOSS RUN' && b.bossName === RR.Worlds.byId(rec.worldId).bossName, 'boss names');
+      const b = bosses[n], tier = n + 1, tag = rec.worldId + '/' + rec.seed + ' t' + tier;
+      H.assert(b.start === bx && b.tier === tier, 'boss ' + tier + ' at ' + b.start + ' tier ' + b.tier);
+      H.assert(b.name === 'BOSS RUN' && b.bossName === w.bossName, 'boss names');
       const climbEnd = b.summitX - 10;
       const len = climbEnd - b.start;
-      H.assert(len >= 250 && len <= 470, 'boss climb length ' + fmt(len));
+      H.assert(len >= 280 && len <= 470, tag + ' boss climb length ' + fmt(len));
       H.assert(b.end - climbEnd >= 40, 'summit plateau ≥ 40 m');
-      // summit plateau flat
       for (let k = idx(climbEnd) + 1; k <= idx(b.end); k++) H.assert(Math.abs(slopeK(rec, k)) < 0.03, 'summit flat at ' + ((k + I0) * DX));
-      // ledges: flat runs 8–15 m inside the climb; pitches = the climbing runs between them
-      let ledges = 0, run = 0, maxS = 0;
-      const pitches = [];
-      let pitch = null;
-      for (let k = idx(b.start) + 1; k <= idx(climbEnd); k++) {
-        const s = slopeK(rec, k);
-        maxS = Math.max(maxS, Math.abs(s));
-        H.assert(!(rec.fl[k] & F.DESIGN), 'no designed jumps inside the boss climb');
-        H.assert(rec.fl[k] & F.BOSS, 'boss flag');
-        if (Math.abs(s) < 0.03) {
-          run++;
-          if (pitch) { pitches.push(pitch); pitch = null; }
-        } else {
-          if (run * DX >= 8 && run * DX <= 16) ledges++;
-          run = 0;
-          if (!pitch) pitch = { a: k, b: k };
-          pitch.b = k;
-        }
-      }
-      if (pitch) pitches.push(pitch);
-      H.assert(ledges >= 3 && ledges <= 5, 'rest ledges ' + ledges);
-      H.assert(maxS <= 0.87, 'boss max slope ' + fmt(maxS, 3));
-      // each pitch's steepest 10 m average rises toward ~0.7–0.8 by the top
-      const avg = (a, bb) => (rec.hs[idx(bb)] - rec.hs[idx(a)]) / (bb - a);
-      const pitchMax = pitches.filter((p) => (p.b - p.a) * DX >= 20).map((p) => {
-        let m = 0;
-        for (let k = p.a; k + 20 <= p.b; k++) m = Math.max(m, (rec.hs[k + 20] - rec.hs[k]) / 10);
-        return m;
+      // section.ledges: sorted rest/run-up ledges inside the climb, flat and 15–34 m long
+      const L = b.ledges;
+      H.assert(Array.isArray(L) && L.length === (tier >= 2 ? 4 : 3), tag + ' ledges ' + (L && L.length));
+      L.forEach((ld, i) => {
+        H.assert(ld.x > b.start + 30 && ld.x2 < climbEnd && ld.x2 - ld.x >= 14.9 && ld.x2 - ld.x <= 34, tag + ' ledge ' + i + ' ' + fmt(ld.x) + '–' + fmt(ld.x2));
+        if (i) H.assert(ld.x >= L[i - 1].x2, tag + ' ledges sorted / disjoint');
+        for (let k = idx(ld.x) + 1; k <= idx(ld.x2); k++) H.assert(Math.abs(slopeK(rec, k)) < 0.03, tag + ' ledge flat at ' + ((k + I0) * DX));
+        H.assert(rec.features.some((f) => f.type === 'plateau' && f.meta.ledge && f.x === ld.x && f.x2 === ld.x2), tag + ' ledge plateau feature');
       });
-      H.assert(pitchMax.length >= 4, 'boss pitches ' + pitchMax.length);
-      const top = pitchMax[pitchMax.length - 1], bottom = pitchMax[0];
-      H.assert(top >= 0.66 && top >= bottom + 0.1, 'boss steepens: pitches ' + pitchMax.map((v) => fmt(v)).join(' → '));
-      for (let q = 1; q < pitchMax.length; q++) H.assert(pitchMax[q] >= pitchMax[q - 1] - 0.03, 'pitches rise monotonically: ' + pitchMax.map((v) => fmt(v)).join(' → '));
-      // sustained 30 m average never exceeds 0.82
-      for (let x = b.start; x + 30 <= climbEnd; x += 5) H.assert(avg(x, x + 30) <= 0.82, 'boss 30 m average ' + fmt(avg(x, x + 30)));
+      // flags: boss everywhere; designed (kicker/trench) samples only inside the tier ≥ 2 gap; a rock garden
+      const gap = rec.features.find((f) => f.type === 'gap' && f.meta.boss && f.x >= b.start && f.x < climbEnd);
+      H.assert(tier >= 2 ? !!gap : !gap, tag + ' boss gap ' + !!gap);
+      let rocks = 0, maxS = 0;
+      for (let k = idx(b.start) + 1; k <= idx(climbEnd); k++) {
+        const x = (k + I0) * DX;
+        H.assert(rec.fl[k] & F.BOSS, 'boss flag');
+        if (rec.fl[k] & F.DESIGN) H.assert(gap && x >= gap.x && x <= gap.meta.trenchX2 + DX, tag + ' designed sample outside the boss gap at ' + x);
+        if (rec.fl[k] & F.ROCKS) rocks++;
+        if (!(rec.fl[k] & F.DESIGN)) maxS = Math.max(maxS, Math.abs(slopeK(rec, k)));
+      }
+      H.assert(rocks * DX >= 14, tag + ' rock garden ' + rocks * DX + ' m');
+      H.assert(maxS <= BOSS_MAX(rec), tag + ' boss max slope ' + fmt(maxS, 3));
+      if (gap) {
+        const lNext = L.find((ld) => ld.x >= gap.meta.trenchX2 - 1e-6);
+        H.assert(gap.meta.vReq <= 10.5 && lNext && lNext.x - gap.meta.trenchX2 < 1.5 && lNext.x2 - lNext.x >= 25, tag + ' gap lands on a long ledge (vReq ' + fmt(gap.meta.vReq) + ')');
+      }
+      // the crux: a sustained headwall — steepest 40 m average ≥ 0.9 (× surface factor ≥ 0.868) and far
+      // steeper than the old 0.8-capped boss; the 30 m average never exceeds the cap
+      let head = 0;
+      for (let k = idx(b.start); k + 80 <= idx(climbEnd); k++) head = Math.max(head, (rec.hs[k + 80] - rec.hs[k]) / 40);
+      H.assert(head >= 0.9 && head <= BOSS_MAX(rec), tag + ' headwall 40 m average ' + fmt(head, 3));
+      const hk = rec.worldId;
+      heads[hk] = heads[hk] || [];
+      heads[hk][tier] = heads[hk][tier] || [];
+      heads[hk][tier].push(head);
       const feats = rec.features.filter((f) => f.x >= b.start && f.x <= b.end);
       const summit = feats.find((f) => f.type === 'summit');
       const cp = feats.find((f) => f.type === 'checkpoint');
       H.assert(summit && cp && summit.x === b.summitX && cp.x === b.summitX, 'summit + checkpoint features at summitX');
     });
   }
+  // later tiers are steeper (mean over seeds): tier 3 ≥ tier 1 + 0.02
+  const mean = (a) => a.reduce((p, q) => p + q, 0) / a.length;
+  for (const [wid, hs] of Object.entries(heads)) if (hs[1] && hs[3]) H.assert(mean(hs[3]) >= mean(hs[1]) + 0.02, wid + ' headwall t1 ' + fmt(mean(hs[1])) + ' → t3 ' + fmt(mean(hs[3])));
 });
 
 H.test('major sections: first 1200–1800 m, then every 2–3 km, 350–600 m, pool ids, no repeats, no overlap', () => {
@@ -622,9 +639,13 @@ H.test('memory bounded with trim (20 km and a 50 km drive)', () => {
 });
 
 H.test('terrainAmpMul 1.6 (daily "extreme hills") stays playable and is bigger', () => {
-  const spread = (rec) => { // mean height range inside 100 m windows over the first 2.6 km
+  const spread = (rec) => { // mean height range inside 100 m windows of normal ground over the first 2.6 km
     let s = 0, n = 0;
+    const skip = Array.from(rec.sections.values()).map((q) => [q.start, q.end])
+      .concat(rec.features.filter((f) => f.type === 'steep' && f.meta.wall).map((f) => [f.x - 60, f.x2]));
     for (let k = idx(200); k < idx(2800); k += 200) {
+      const x0 = (k + I0) * DX;
+      if (skip.some((q) => x0 < q[1] && x0 + 100 > q[0])) continue;
       let lo = Infinity, hi = -Infinity;
       for (let j = 0; j < 200; j++) { lo = Math.min(lo, rec.hs[k + j]); hi = Math.max(hi, rec.hs[k + j]); }
       s += hi - lo; n++;
@@ -633,16 +654,20 @@ H.test('terrainAmpMul 1.6 (daily "extreme hills") stays playable and is bigger',
   };
   for (const w of WORLDS) {
     let sBig = 0, sBase = 0;   // aggregated over seeds: pattern placement shifts when sizes change
-    for (const seed of [SEEDS[0], SEEDS[2]]) {
-      const big = drive(w.id, seed, { modifiers: { terrainAmpMul: 1.6 }, cp: false, step: 5, dist: Math.min(DIST, 14000) });
+    // playability over 9 km on two seeds; the size comparison over 10 seeds (pattern placement shifts when
+    // sizes change, so a handful of seeds is noisy)
+    const seeds = SEEDS.concat([7, 8, 9, 10, 11]);
+    for (let q = 0; q < seeds.length; q++) {
+      const seed = seeds[q], full = q < 2;
+      const big = drive(w.id, seed, { modifiers: { terrainAmpMul: 1.6 }, cp: false, step: 5, dist: full ? Math.min(DIST, 9000) : 3500 });
       H.assert(big.problems.length === 0, w.id + ' amp 1.6: ' + big.problems.slice(0, 3).join(' | '));
       H.assert(big.jumps.fail.length === 0, w.id + ' amp 1.6 jumps: ' + big.jumps.fail.slice(0, 3).join(' | '));
       const an = analyse(big);
-      H.assert(an.maxOrganic <= 1.04 && an.maxDesignUp <= 0.705 && an.maxBoss <= 0.87, w.id + ' amp 1.6 slopes');
-      const base = runs.find((r) => r.worldId === w.id && r.seed === seed);
+      H.assert(an.maxOrganic <= 1.04 && an.maxDesignUp <= 0.705 && an.maxBoss <= BOSS_MAX(big) && an.maxWall <= WALL_MAX(big), w.id + ' amp 1.6 slopes');
+      const base = runs.find((r) => r.worldId === w.id && r.seed === seed) || drive(w.id, seed, { cp: false, step: 5, dist: 3500 });
       sBig += spread(big); sBase += spread(base);
     }
-    H.assert(sBig > sBase * 1.2, w.id + ' amp 1.6 not larger (' + fmt(sBig / 2) + ' vs ' + fmt(sBase / 2) + ' m per 100 m window)');
+    H.assert(sBig > sBase * 1.2, w.id + ' amp 1.6 not larger (' + fmt(sBig / seeds.length) + ' vs ' + fmt(sBase / seeds.length) + ' m per 100 m window)');
   }
 });
 
@@ -655,7 +680,7 @@ H.test('difficulty ramps: later terrain has more gaps/rocks and steeper slopes',
       // normal ground only (sections have their own shaping)
       const inSection = Array.from(rec.sections.values()).some((s) => f.x >= s.start - 50 && f.x <= s.end + 400);
       if (inSection) continue;
-      const hard = f.type === 'gap' || f.type === 'rocks' || f.type === 'lava';
+      const hard = f.type === 'gap' || f.type === 'rocks' || f.type === 'lava' || (f.type === 'steep' && f.meta.wall);
       if (f.x >= E0 && f.x < E1) { if (hard) early++; if (f.type === 'steep') earlySteep++; } else if (f.x >= L0 && f.x < L1) { if (hard) late++; if (f.type === 'steep') lateSteep++; }
     }
   }
@@ -664,16 +689,205 @@ H.test('difficulty ramps: later terrain has more gaps/rocks and steeper slopes',
   H.assert(lateSteep / rL > earlySteep / rE, 'steep stretches early ' + earlySteep + ' vs late ' + lateSteep);
 });
 
+// ================================================================== review fixes (terrain-1/2/3)
+H.test('signature set piece first: THE STORM / THE VOLCANO / THE MOON open at 1.2–1.6 km on 20/20 seeds; others vary', () => {
+  const SIG = { storm_planet: 'storm', volcanic_ridge: 'volcano', moon_base: 'moon' };
+  for (const w of WORLDS) {
+    const firsts = new Set();
+    for (let seed = 1; seed <= 20; seed++) {
+      const t = new T({ seed: seed * 7919, world: w });
+      const s = t.upcomingSection(0);
+      H.assert(s && s.id !== 'boss' && s.start >= 1200 && s.end <= 2850, w.id + ' first section ' + (s && s.id) + '@' + (s && s.start));
+      if (SIG[w.id]) H.assert(s.id === SIG[w.id] && s.start <= 1600, w.id + '/' + seed + ' opens with ' + s.id + '@' + s.start);
+      firsts.add(s.id);
+      // the second major is from the random pool and never repeats the first
+      const s2 = t.upcomingSection(3200);
+      const nxt = s2 && s2.id === 'boss' ? t.upcomingSection(s2.start + 1) : s2;
+      if (w.sectionPool.length > 1) H.assert(nxt && nxt.id !== s.id, w.id + ' second section repeats the first');
+    }
+    if (!SIG[w.id]) H.assert(firsts.size >= 2, w.id + ' first sections should vary (' + Array.from(firsts).join(',') + ')');
+  }
+  // world.signatureSection overrides the mapping (must be in the pool)
+  const custom = Object.assign({}, RR.Worlds.byId('green_valley'), { signatureSection: 'cave' });
+  for (let seed = 1; seed <= 5; seed++) H.assert(new T({ seed, world: custom }).upcomingSection(0).id === 'cave', 'signatureSection override');
+});
+
+H.test('late slope budget: uphill limit × lerp(1, 1.3, smoothstep(D, 2.5·D)) capped at 1.25; downhill and early limits unchanged', () => {
+  for (const w of WORLDS) {
+    const t = new T({ seed: 3, world: w });
+    const ms = w.terrain.maxSlope, D = w.terrain.difficultyDistance;
+    H.assertClose(t.maxSlopeAt(0), Math.min(0.5, ms), 1e-12, w.id + ' start limit');
+    H.assertClose(t.maxSlopeAt(D), ms, 1e-12, w.id + ' limit at D');
+    H.assertClose(t.maxSlopeAt(1.75 * D), ms * 1.15 > 1.25 ? Math.max(ms, 1.25) : ms * 1.15, 1e-9, w.id + ' limit at 1.75·D');
+    H.assertClose(t.maxSlopeAt(2.5 * D), Math.min(1.25, ms * 1.3), 1e-12, w.id + ' limit at 2.5·D');
+    H.assertClose(t.maxSlopeAt(9 * D), Math.min(1.25, ms * 1.3), 1e-12, w.id + ' limit far out');
+    H.assertClose(t.maxDownSlopeAt(9 * D), ms, 1e-12, w.id + ' downhill limit stays at maxSlope');
+    for (let x = 0; x < 3 * D; x += 250) H.assert(t.maxSlopeAt(x + 250) >= t.maxSlopeAt(x) - 1e-12, 'monotonic');
+  }
+  // the recorded courses reach steeper organic climbs late than at D (every world, 20 km)
+  if (DIST >= 16000) {
+    for (const w of WORLDS) {
+      let atD = 0, late = 0;
+      const D = w.terrain.difficultyDistance;
+      for (const rec of runs.filter((r) => r.worldId === w.id)) {
+        for (let k = idx(0.6 * D); k < idx(Math.min(rec.dist, 3 * D)); k++) {
+          if (rec.fl[k] & (F.DESIGN | F.BOSS | F.WALL)) continue;
+          const s = slopeK(rec, k), x = (k + I0) * DX;
+          if (x < D) atD = Math.max(atD, s); else if (x > 2 * D) late = Math.max(late, s);
+        }
+      }
+      if (late > 0) H.assert(late > atD + 0.05, w.id + ' late organic climbs ' + fmt(late) + ' vs ' + fmt(atD) + ' before D');
+    }
+  }
+});
+
+H.test('wall climbs: scheduled after ≥ 1.5 km, ≥ 40 m flat run-up, 8–15 m face, steeper with distance, clear of sections', () => {
+  const byWorld = {};
+  for (const rec of runs) {
+    const w = RR.Worlds.byId(rec.worldId);
+    const walls = rec.features.filter((f) => f.type === 'steep' && f.meta.wall && f.x2 < rec.dist);
+    const secs = Array.from(rec.sections.values());
+    H.assert(walls.length >= Math.floor((rec.dist - 3000) / 1400), rec.worldId + '/' + rec.seed + ' only ' + walls.length + ' walls');
+    let prev = -Infinity;
+    for (const f of walls) {
+      const m = f.meta, tag = rec.worldId + '/' + rec.seed + ' wall@' + fmt(f.x);
+      H.assert(f.x >= 1500 && (w.id !== 'green_valley' || f.x >= 1750), tag + ' too early');
+      H.assert(f.x - prev >= 250, tag + ' spacing ' + fmt(f.x - prev));
+      prev = f.x;
+      H.assert(m.dir === 1 && m.faceX > f.x && m.faceX2 > m.faceX && m.faceX2 - m.faceX >= 7.9 && m.faceX2 - m.faceX <= 15.1, tag + ' face ' + fmt(m.faceX2 - m.faceX));
+      H.assert(m.maxSlope >= 0.7 && m.maxSlope <= WALL_MAX(rec) && m.rise > 5, tag + ' slope ' + fmt(m.maxSlope) + ' rise ' + fmt(m.rise));
+      // the face really is that steep; the run-up before the ramp is ≤ 0.2 for ≥ 40 m
+      let face = Infinity;
+      for (let k = idx(m.faceX) + 1; k <= idx(m.faceX2); k++) face = Math.min(face, slopeK(rec, k));
+      H.assert(Math.abs(face - m.maxSlope) < 1e-6, tag + ' face slope ' + fmt(face, 3));
+      for (let k = idx(f.x - 40) + 1; k <= idx(f.x); k++) H.assert(Math.abs(slopeK(rec, k)) <= 0.2, tag + ' run-up slope ' + fmt(slopeK(rec, k)) + ' at ' + ((k + I0) * DX));
+      for (let k = idx(f.x) + 1; k <= idx(f.x2); k++) H.assert(rec.fl[k] & F.WALL, tag + ' wall flag');
+      for (const s of secs) H.assert(f.x2 < s.start - 50 || f.x - 60 > s.end + (s.id === 'boss' ? 200 : 20), tag + ' overlaps section ' + s.id + '@' + s.start);
+      // never right after a landing zone
+      for (const j of rec.features) if (j.type === 'jump' || j.type === 'gap' || j.type === 'lava') {
+        H.assert(!(j.meta.landingZoneX2 > f.x - 40 && j.x < f.x), tag + ' right after a ' + j.type + ' landing');
+      }
+      const S = byWorld[rec.worldId] = byWorld[rec.worldId] || { k46: 0, k5: 0, late: 0 };
+      const eq = m.maxSlope / (rec.t._wallFricF * rec.t._gravF);   // rock-at-1-g equivalent (ability ∝ friction^0.8)
+      if (f.x >= 4000 && f.x <= 6000) S.k46 = Math.max(S.k46, m.maxSlope);
+      if (f.x <= 5000) S.k5 = Math.max(S.k5, eq);
+    }
+  }
+  // the review's slope-scan targets: GV walls 40–42° (±1°) by 4–6 km; harder worlds 45–50° by 5 km
+  const deg = (s) => Math.atan(s) * 180 / Math.PI;
+  const gv = byWorld.green_valley;
+  H.assert(gv && deg(gv.k46) >= 39 && deg(gv.k46) <= 43.5, 'green_valley walls at 4–6 km ' + fmt(deg(gv.k46), 1) + '°');
+  for (const id of ['rocky_highlands', 'storm_planet', 'neon_city', 'volcanic_ridge']) {
+    const S = byWorld[id];
+    H.assert(S && deg(S.k5) >= 44.5 && deg(S.k5) <= 50.5, id + ' walls by 5 km ' + fmt(deg(S.k5), 1) + '° (rock equivalent)');
+  }
+});
+
+H.test('requestFeature("steep", x): returns the next wall within 280 m, generating ahead without changing the course', () => {
+  const t = new T({ seed: 42, world: 'rocky_highlands' });
+  const ref = drive('rocky_highlands', 42, { dist: 9000, cp: false, step: 7 });
+  const refWalls = ref.features.filter((f) => f.type === 'steep' && f.meta.wall);
+  H.assert(refWalls.length >= 4, 'reference walls');
+  H.assert(t.requestFeature('jump', 100) === null && t.requestFeature('steep', NaN) === null, 'unknown type / bad x → null');
+  let x = 0, hits = 0, asks = 0;
+  const rnd = lcg(99);
+  while (x < 8500) {
+    x += 40 + rnd() * 80;
+    t.ensure(x + 160);
+    if (rnd() < 0.5) {
+      asks++;
+      const f = t.requestFeature('steep', x + 120);
+      const exp = refWalls.find((w) => w.x >= x + 120 && w.x <= x + 400);
+      if (f) {
+        hits++;
+        H.assert(f.type === 'steep' && f.meta.wall && f.x >= x + 120 && f.x <= x + 400 && f.meta.dir === 1, 'feature in range');
+        H.assert(exp && Math.abs(exp.x - f.x) < 1e-9 && exp.x2 === f.x2, 'returns the scheduled wall');
+        H.assert(t._wEnd * DX > f.x2, 'ground written through the wall (coins can be placed on it)');
+        H.assert(Math.abs(t.heightAt(f.meta.faceX2) - t.heightAt(f.meta.faceX) - f.meta.maxSlope * (f.meta.faceX2 - f.meta.faceX)) < 1e-6, 'heights are final');
+      } else {
+        H.assert(!exp || exp.x > x + 120 + 280, 'missed a wall at ' + (exp && exp.x) + ' (asked at ' + fmt(x + 120) + ')');
+      }
+    }
+    t.trim(x - 250);
+  }
+  H.assert(hits >= 3 && asks > 20, 'hook hits ' + hits + '/' + asks);
+  // content-neutral: the course matches a drive that never called the hook
+  const probe = new T({ seed: 42, world: 'rocky_highlands' });
+  probe.ensure(200);
+  for (let q = 0; q < 40; q++) probe.requestFeature('steep', q * 200);
+  for (let xx = 0; xx < 8500; xx += 100) probe.ensure(xx + 160);
+  for (let k = idx(0); k < idx(8400); k += 3) {
+    const i = k + I0;
+    if (i < probe._minIdx) continue;
+    H.assert(probe.pointY(i) === ref.hs[k], 'course changed at x=' + i * DX);
+  }
+});
+
+H.test('boss ledges feed the collectibles contract: section.ledges on the live section and the teaser', () => {
+  const t = new T({ seed: 5, world: 'green_valley' });
+  const teaser = t.upcomingSection(2500);
+  for (let g = 0; g < 4 && t.maxX < 3500; g++) t.ensure(3500);
+  const live = t.sectionAt(3100);
+  H.assert(live && live.id === 'boss' && live === teaser, 'teaser is the live section object');
+  const mid = live.ledges[Math.floor(live.ledges.length / 2)];
+  H.assert(mid.x > live.start + 100 && mid.x2 < live.summitX - 100, 'middle ledge in the middle of the climb');
+  // the crux headwall follows the middle ledge, after ≥ 15 m of base grade
+  let firstSteep = null;
+  for (let x = mid.x2; x < live.summitX; x += 0.5) if (t.slopeAt(x) > 0.95) { firstSteep = x; break; }
+  H.assert(firstSteep !== null && firstSteep - mid.x2 >= 15, 'headwall ' + fmt(firstSteep - mid.x2) + ' m after the middle ledge');
+});
+
+// Real physics on the real boss (no Run): an upgraded car must always be able to clear it — the
+// terrain is never a soft-lock for a sufficiently upgraded vehicle — and the tier-1 crux is still a crux.
+H.test('boss is passable by upgraded cars and a real test for the stock Trail Buggy (real physics)', () => {
+  const RRp = H.load(['js/core/utils.js', 'js/data/vehicles.js', 'js/data/worlds.js', 'js/game/physics.js', 'js/game/terrain.js']);
+  const U = RRp.Util;
+  const ALL = (l) => ({ engine: l, suspension: l, tires: l, fuel: l, grip: l, air: l, brakes: l });
+  function climb(world, seed, tier, vid, up) {
+    const t = new RRp.Terrain({ seed, world });
+    const bx = 3000 + 5000 * (tier - 1);
+    for (let g = 0; g < 12 && t.maxX < bx + 600; g++) t.ensure(bx + 600);
+    const boss = t.sections.find((s) => s.id === 'boss' && s.tier === tier);
+    const b = new RRp.VehicleBody(RRp.Vehicles.getTuned(vid, up), 0, 0);
+    b.placeOnTerrain(t, boss.start - 40); b.setVelocity(12, 0);
+    const env = { terrain: t, gravity: 9.81 * RRp.Worlds.byId(world).gravity };
+    let stuck = 0;
+    for (let i = 0; i < 120 * 100; i++) {
+      const rel = U.wrapAngle(b.angle - Math.atan(t.slopeAt(b.x)));
+      let thr = 1, lean = 0;
+      if (b.grounded || b.bodyContact) { if (rel > 0.5) { thr = 0.2; lean = -1; } else if (rel > 0.25) { lean = -1; thr = 0.8; } else if (rel < -0.3) lean = 1; }
+      else { const err = U.wrapAngle(b.angle - Math.atan(t.slopeAt(b.x + b.vx * 0.4))); lean = U.clamp(-err * 2.5 - b.av * 0.5, -1, 1); thr = 0; }
+      b.step(1 / 120, { throttle: thr, lean }, env);
+      if (b.x > boss.summitX + 2) return 'clear';
+      if (Math.abs(rel) > 2.2) return 'flip@' + Math.round(b.x - boss.start);
+      stuck = Math.hypot(b.vx, b.vy) < 0.4 ? stuck + 1 / 120 : 0;
+      if (stuck > 5) return 'stuck@' + Math.round(b.x - boss.start);
+    }
+    return 'timeout';
+  }
+  const res = [];
+  for (const [world, seed] of [['green_valley', 777], ['rocky_highlands', 808]]) {
+    const r1 = climb(world, seed, 1, 'rock_crawler', {});
+    const r2 = climb(world, seed, 1, 'trail_buggy', { engine: 5, grip: 5 });
+    const r3 = climb(world, seed, 3, 'trail_buggy', ALL(10));
+    const r4 = climb(world, seed, 1, 'trail_buggy', {});
+    res.push(world + ': crawler ' + r1 + ', buggy eg5 ' + r2 + ', buggy all10 t3 ' + r3 + ', stock buggy ' + r4);
+    H.assert(r1 === 'clear' && r2 === 'clear' && r3 === 'clear', 'upgraded cars clear: ' + res[res.length - 1]);
+    H.assert(r4 !== 'clear', 'the stock Trail Buggy should not simply cruise up: ' + res[res.length - 1]);
+  }
+  console.log('      ' + res.join('\n      '));
+});
+
 // ------------------------------------------------------------------ readable summary
 H.test('summary', () => {
   const types = ['jump', 'gap', 'lava', 'rocks', 'steep', 'plateau', 'valley', 'bouncepad', 'boostpad', 'summit'];
   console.log('\n      feature counts (sum over ' + SEEDS.length + ' seeds × ' + DIST / 1000 + ' km) and slope maxima');
   console.log('      ' + 'world'.padEnd(16) + types.map((t) => t.slice(0, 7).padStart(8)).join('') +
-    '  org/lim  ramp  trench  boss  maxV');
+    '  org/lim  ramp  trench  boss  wall  maxV');
   for (const w of WORLDS) {
     const S = summary[w.id];
     console.log('      ' + w.id.padEnd(16) + types.map((t) => String(S.counts[t] || 0).padStart(8)).join('') +
-      '   ' + fmt(S.maxOrganic).padStart(5) + '  ' + fmt(S.maxDesignUp) + '   ' + fmt(S.maxTrenchUp) + '  ' + fmt(S.maxBoss) + '  ' + fmt(S.maxV, 1));
+      '   ' + fmt(S.maxOrganic).padStart(5) + '  ' + fmt(S.maxDesignUp) + '   ' + fmt(S.maxTrenchUp) + '  ' + fmt(S.maxBoss) + '  ' + fmt(S.maxWall) + '  ' + fmt(S.maxV, 1));
   }
   console.log('\n      sections (seed ' + SEEDS[0] + ')');
   for (const w of WORLDS) console.log('      ' + w.id.padEnd(16) + summary[w.id].sections);

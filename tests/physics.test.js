@@ -280,7 +280,7 @@ H.test('12d upgradeCost follows the contract formula', () => {
 
 H.test('12e describeUpgrade and displayStats are readable and increase with upgrades', () => {
   const pattern = {
-    engine: /^Torque$/, suspension: /^Damping$/, tires: /^Top speed$/, fuel: /^Tank$/, grip: /^Grip$/,
+    engine: /^Torque$/, suspension: /^Damping$/, tires: /^Snow grip$/, fuel: /^Tank$/, grip: /^Grip$/,
     air: /^Air torque$/, brakes: /^Brake$/
   };
   const d0 = V.describeUpgrade('trail_buggy', 'engine', 1);
@@ -289,7 +289,8 @@ H.test('12e describeUpgrade and displayStats are readable and increase with upgr
   // (integration balance pass: full-throttle consumption = burnRate + idleBurn)
   H.assert(V.describeUpgrade('trail_buggy', 'fuel', 1).value === '100 L · 4.9 L/s', 'buggy tank ' + V.describeUpgrade('trail_buggy', 'fuel', 1).value);
   H.assert(/^μ \d\.\d\d$/.test(V.describeUpgrade('trail_buggy', 'grip', 1).value), 'grip format');
-  H.assert(/km\/h$/.test(V.describeUpgrade('trail_buggy', 'tires', 4).value), 'tires km/h');
+  H.assert(/^\d+% of dry$/.test(V.describeUpgrade('trail_buggy', 'tires', 4).value), 'tires snow grip ' + V.describeUpgrade('trail_buggy', 'tires', 4).value);
+  H.assert(/top speed \d+ km\/h$/.test(V.describeUpgrade('trail_buggy', 'tires', 4).detail), 'tires detail has the top speed');
   for (const id of IDS) {
     for (const cat of CATS) {
       const lo = V.describeUpgrade(id, cat, 1), hi = V.describeUpgrade(id, cat, 10);
@@ -319,6 +320,36 @@ H.test('12e describeUpgrade and displayStats are readable and increase with upgr
   H.assert(st('dirt_runner').air === Math.max(...IDS.map((i) => st(i).air)), 'dirt runner air');
   H.assert(st('storm_runner').speed === Math.max(...IDS.map((i) => st(i).speed)), 'storm speed');
   H.assert(st('mountain_truck').stability > st('dirt_runner').stability, 'truck stability');
+});
+
+H.test('12f describeUpgrade uses the whole upgrade set: garage values = the real car, preview = after buying', () => {
+  const kmh = (v) => Math.round(v * 3.6);
+  const ups = { engine: 8, suspension: 5, tires: 8, fuel: 6, grip: 7, air: 4, brakes: 5 };
+  for (const id of IDS) {
+    const t = V.getTuned(id, ups);
+    H.assert(V.describeUpgrade(id, 'engine', 8, ups).detail === 'Top speed ' + kmh(t.topSpeed) + ' km/h', id + ' ENGINE top speed');
+    H.assert(V.describeUpgrade(id, 'tires', 8, ups).detail.endsWith('top speed ' + kmh(t.topSpeed) + ' km/h'), id + ' TIRES top speed');
+    for (const cat of CATS) {
+      for (let lv = 1; lv < 10; lv++) {
+        const cur = Object.assign({}, ups, { [cat]: lv });
+        const next = V.describeUpgrade(id, cat, lv + 1, cur);
+        const after = V.describeUpgrade(id, cat, lv + 1, Object.assign({}, cur, { [cat]: lv + 1 }));
+        H.assert(next.value === after.value && next.detail === after.detail, id + ' ' + cat + ' ' + lv + ' preview = after buying');
+      }
+    }
+  }
+  // the TIRES rolling-resistance % compares against stock tyres on the same car
+  H.assert(/Rolling resistance −60%/.test(V.describeUpgrade('trail_buggy', 'tires', 10, { engine: 9 }).detail), 'rolling % vs stock tyres');
+  H.assert(!/Rolling/.test(V.describeUpgrade('trail_buggy', 'tires', 1, { engine: 9 }).detail), 'stock tyres: no rolling %');
+  // without the 4th argument the saved upgrades are used (RR.Save), else stock
+  const saved = RR.Save;
+  try {
+    RR.Save = { data: { upgrades: { trail_buggy: { engine: 6, tires: 7 } } } };
+    H.assert(V.describeUpgrade('trail_buggy', 'tires', 8).detail.endsWith('top speed ' + kmh(V.getTuned('trail_buggy', { engine: 6, tires: 8 }).topSpeed) + ' km/h'), 'Save fallback');
+    H.assert(V.describeUpgrade('trail_buggy', 'engine', 6).detail === 'Top speed ' + kmh(V.getTuned('trail_buggy', { engine: 6, tires: 7 }).topSpeed) + ' km/h', 'Save fallback engine');
+    RR.Save = { data: { upgrades: { trail_buggy: 'junk' } } };
+    H.assert(V.describeUpgrade('trail_buggy', 'engine', 1).detail === 'Top speed ' + kmh(V.getTuned('trail_buggy', {}).topSpeed) + ' km/h', 'junk save → stock');
+  } finally { RR.Save = saved; }
 });
 
 // ================================================================== 1. rest
@@ -673,6 +704,149 @@ H.test('wheelies: throttle lifts the front on a climb, and motor reaction rotate
   H.assert(r.angle < -0.5 * DEG, 'pitches forward under braking');
 });
 
+// ================================================================== wheelie / launch limiter (review physics-1/2)
+H.test('launch control: no wheelie or flip on flat at full throttle without W, at any engine/grip level', () => {
+  const flat = Terr.flat();
+  const rows = [];
+  for (const id of ['trail_buggy', 'dirt_runner', 'rally_beast', 'storm_runner', 'mountain_truck']) {
+    for (const up of [{ engine: 7, grip: 4 }, { engine: 10, grip: 10 }, MAXED]) {
+      const { b } = makeBody(id, up);
+      b.placeOnTerrain(flat, 0);
+      let maxPitch = 0;
+      sim(b, flat, 5, { throttle: 1 }, null, (body) => { maxPitch = Math.max(maxPitch, body.angle); });
+      H.assert(maxPitch < 25 * DEG && !b.headHit, id + ' ' + JSON.stringify(up) + ' max pitch ' + (maxPitch / DEG).toFixed(1) + '°');
+      rows.push((maxPitch / DEG).toFixed(0));
+    }
+  }
+  console.log('      launch max pitch (deg):', rows.join(' '));
+  // the limiter is a driver aid on the drive torque only: it reports what it removed
+  const { b } = makeBody('dirt_runner', MAXED);
+  b.placeOnTerrain(flat, 0);
+  let lim = 0;
+  sim(b, flat, 1.5, { throttle: 1 }, null, (body) => { lim = Math.max(lim, body.driveLimit); });
+  H.assert(lim > 0.05 && lim <= 1, 'driveLimit reported: ' + lim.toFixed(2));
+  sim(b, flat, 0.1, { throttle: 0 });
+  H.assert(b.driveLimit === 0, 'driveLimit is 0 off the gas');
+});
+
+H.test('launch control keeps W wheelies and upgraded acceleration', () => {
+  const flat = Terr.flat();
+  // pulse W to hold a wheelie (lift to ~20°, let it settle, catch it with S past ~35°)
+  for (const [id, up] of [['trail_buggy', {}], ['dirt_runner', {}], ['rally_beast', {}], ['trail_buggy', MAXED], ['dirt_runner', MAXED]]) {
+    const { b } = makeBody(id, up);
+    b.placeOnTerrain(flat, 0);
+    let maxPitch = 0, wheelie = 0, best = 0;
+    sim(b, flat, 6, (time, body) => ({ throttle: 1, lean: body.angle < 0.35 ? 1 : body.angle > 0.6 ? -1 : 0 }), null, (body) => {
+      maxPitch = Math.max(maxPitch, body.angle);
+      if (body.wheels[0].grounded && !body.wheels[1].grounded) { wheelie += DT; best = Math.max(best, wheelie); } else wheelie = 0;
+      return body.headHit;
+    });
+    H.assert(!b.headHit && maxPitch >= 0.35 && maxPitch < 1.1, id + ' W wheelie pitch ' + (maxPitch / DEG).toFixed(0) + '°');
+    H.assert(best > 1, id + ' holds a wheelie ' + best.toFixed(2) + ' s');
+  }
+  // the heavy cars that never lifted their nose accelerate exactly as hard as before (upgrades still pay)
+  for (const id of ['mountain_truck', 'rock_crawler']) {
+    const lo = topSpeedRun(id, { engine: 5 }), hi = topSpeedRun(id, MAXED);
+    H.assert(hi.t15 < lo.t15 * 0.85, id + ' maxed 0→15 ' + hi.t15.toFixed(2) + ' s vs E5 ' + lo.t15.toFixed(2));
+    H.assert(hi.t15 < (id === 'mountain_truck' ? 1.4 : 1.36), id + ' maxed 0→15 ' + hi.t15.toFixed(2) + ' s (was 1.33 / 1.30 before the limiter)');
+  }
+});
+
+H.test('tail stand: a car landing on its tail with the gas held drops back onto its wheels', () => {
+  const flat = Terr.flat();
+  const p = { x: 0, y: 0 };
+  const rows = [];
+  for (const id of IDS) {
+    for (const a0 of [1.0, 1.25, 1.45]) {
+      const { b, t } = makeBody(id);
+      b.setPose(0, 5, a0);
+      let low = Infinity;
+      for (const w of b.wheels) low = Math.min(low, w.y - w.radius);
+      for (const q of t.chassis.hull) { b.worldPoint(q.x, q.y, p); low = Math.min(low, p.y); }
+      b.setPose(0, 5 - low + 0.02, a0);
+      b.setVelocity(15, 0);
+      let high = 0;
+      sim(b, flat, 4, { throttle: 1 }, null, (body) => {
+        if (body.wheels[0].grounded && speed(body) > 5 && body.angle > 52 * DEG) high += DT;
+        return body.headHit;
+      });
+      rows.push(high.toFixed(1));
+      H.assert(high < 1, id + ' from ' + (a0 / DEG).toFixed(0) + '°: rode on the tail for ' + high.toFixed(2) + ' s');
+      H.assert(!b.headHit && Math.abs(b.angle) < 20 * DEG && b.bothGrounded && speed(b) > 10, id + ' back on its wheels and driving: ' +
+        (b.angle / DEG).toFixed(0) + '° ' + speed(b).toFixed(1) + ' m/s');
+    }
+  }
+  console.log('      s above 52° on the tail:', rows.join(' '));
+  // holding W on a tail stand: the motor no longer pushes it along (tail-stand fade, even with W)
+  const { b, t } = makeBody('trail_buggy');
+  b.setPose(0, 5, 1.2);
+  let low = Infinity;
+  for (const w of b.wheels) low = Math.min(low, w.y - w.radius);
+  for (const q of t.chassis.hull) { b.worldPoint(q.x, q.y, p); low = Math.min(low, p.y); }
+  b.setPose(0, 5 - low + 0.02, 1.2);
+  b.setVelocity(10, 0);
+  let cut = 0, vStand = null;
+  sim(b, flat, 1, { throttle: 1, lean: 1 }, null, (body) => {
+    if (body.angle > 1.38 && body.wheels[0].grounded && body.bodyContact) {
+      cut = Math.max(cut, body.driveLimit);
+      if (vStand === null) vStand = speed(body);
+    }
+  });
+  H.assert(cut > 0.95, 'tail-stand fade with W: drive cut ' + cut.toFixed(2));
+  H.assert(vStand !== null && speed(b) < vStand, 'the tail drags it down: ' + (vStand || 0).toFixed(1) + ' → ' + speed(b).toFixed(1) + ' m/s');
+  H.assert(b._hullC.some((c) => c.tail) && b._hullC.some((c) => !c.tail), 'tail hull points are marked');
+});
+
+H.test('launch control: a D-only wheelie past ~46° is not held at the balance torque (nose comes down)', () => {
+  // (verifier) the cap alone could balance a steep wheelie with D held (Storm Runner rode 52-60° for ~2 s in
+  // tailride.js); past HIGH_WHEELIE_LO the drive fades towards the tail-stand band, so a car that lands on
+  // its rear wheel at ~55° with the nose still rising drops it again quickly.
+  const flat = Terr.flat();
+  const p = { x: 0, y: 0 };
+  const rows = [];
+  for (const id of ['trail_buggy', 'dirt_runner', 'rally_beast', 'storm_runner']) {
+    const { b, t } = makeBody(id);
+    const a0 = 0.95;
+    b.setPose(0, 5, a0);
+    let low = Infinity;
+    for (const w of b.wheels) low = Math.min(low, w.y - w.radius);
+    for (const q of t.chassis.hull) { b.worldPoint(q.x, q.y, p); low = Math.min(low, p.y); }
+    b.setPose(0, 5 - low + 0.02, a0);
+    b.setVelocity(10, 0);
+    b.av = 0.8;                                   // nose still rising
+    let high = 0;
+    sim(b, flat, 4, { throttle: 1 }, null, (body) => {
+      if (body.wheels[0].grounded && body.angle > 52 * DEG) high += DT;
+      return body.headHit;
+    });
+    rows.push(high.toFixed(2));
+    // before this fade: 0.77 / 0.54 / 1.02 / 1.07 s
+    H.assert(high < 0.7, id + ': held above 52° on D only for ' + high.toFixed(2) + ' s');
+    H.assert(!b.headHit && Math.abs(b.angle) < 20 * DEG, id + ' back down: ' + (b.angle / DEG).toFixed(0) + '°');
+  }
+  console.log('      s above 52° on D only (landing at 54°, nose rising):', rows.join(' '));
+});
+
+H.test('gas in the air fades in: a 1 s crest hop on gas turns little, long jumps keep the gas flip', () => {
+  const rows = [];
+  for (const id of IDS) {
+    const hop = (ctl, secs) => {
+      const { b } = makeBody(id);
+      b.setPose(0, 200, 0);
+      b.setVelocity(20, 0);          // wheels already rolling, like a real take-off
+      sim(b, Terr.flat(), secs, ctl);
+      return b.angle;
+    };
+    const gas1 = hop({ throttle: 1 }, 1), gas2 = hop({ throttle: 1 }, 2);
+    const w1 = hop({ lean: 1 }, 1), wg1 = hop({ throttle: 1, lean: 1 }, 1);
+    rows.push(id + ' ' + (gas1 / DEG).toFixed(0) + '/' + (gas2 / DEG).toFixed(0) + '°');
+    H.assert(gas1 < 45 * DEG, id + ' gas-only 1 s hop turns ' + (gas1 / DEG).toFixed(0) + '°');
+    H.assert(gas2 > gas1 + 60 * DEG, id + ' gas keeps rotating on a long jump: ' + (gas2 / DEG).toFixed(0) + '°');
+    H.assert(wg1 >= w1 - 1e-6, id + ' W + gas at least as fast as W');
+  }
+  console.log('      gas-only rotation after 1 s / 2 s:', rows.join(' | '));
+});
+
 H.test('SUSPENSION upgrade: softer landings (lower peak deceleration, no rebound hop)', () => {
   const flat = Terr.flat();
   const land = (id, lv) => {
@@ -873,7 +1047,7 @@ H.test('camera: base zoom, frame-rate independence, look-ahead, zoom-out, contai
   const C = RR.Camera;
   const cam = new C();
   cam.setViewport(1280, 720);
-  H.assertClose(cam.baseZoom, Math.min(720 / 15, 1280 / 24), 1e-9, 'base zoom');
+  H.assertClose(cam.baseZoom, Math.min(720 / 12, 1280 / 19), 1e-9, 'base zoom');
   // drive the same trajectory at 30 and 144 FPS
   const traj = (t) => ({ x: 20 * t + 2 * Math.sin(t), y: 3 * Math.sin(t * 0.7) + 0.03 * Math.sin(t * 40), vx: 20 + 2 * Math.cos(t), vy: 2.1 * Math.cos(t * 0.7), airTime: t > 3 && t < 4.5 ? t - 3 : 0 });
   const runAt = (fps) => {
@@ -889,11 +1063,11 @@ H.test('camera: base zoom, frame-rate independence, look-ahead, zoom-out, contai
   const c = new C(); c.setViewport(1280, 720); c.reset(0, 0);
   let x = 0;
   for (let i = 0; i < 600; i++) { x += 30 / 60; c.update(1 / 60, { x, y: 0, vx: 30, vy: 0, airTime: 0 }, {}); }
-  H.assert(c.x - x > 3 && c.x - x < 0.3 * c.viewW / c.zoom, 'look-ahead ' + (c.x - x).toFixed(2));
-  H.assert(c.zoom < c.baseZoom * 0.9 && c.zoom >= c.baseZoom * (1 - 0.18) - 1e-6, 'speed zoom-out ' + (c.zoom / c.baseZoom).toFixed(3));
-  // big air zooms out further, but never more than 25 %
+  H.assert(c.x - x > 3 && c.x - x <= 0.3 * c.viewW / c.zoom + 1e-6, 'look-ahead ' + (c.x - x).toFixed(2));
+  H.assert(c.zoom < c.baseZoom * 0.85 && c.zoom >= c.baseZoom * (1 - 0.24) - 1e-6, 'speed zoom-out ' + (c.zoom / c.baseZoom).toFixed(3));
+  // big air zooms out further, but never more than 30 %
   for (let i = 0; i < 240; i++) { x += 30 / 60; c.update(1 / 60, { x, y: 10, vx: 30, vy: 0, airTime: 2 + i / 60, heightAboveGround: 12 }, {}); }
-  H.assert(c.zoom >= c.baseZoom * 0.75 - 1e-6 && c.zoom < c.baseZoom * 0.8, 'air zoom ' + (c.zoom / c.baseZoom).toFixed(3));
+  H.assert(c.zoom >= c.baseZoom * 0.7 - 1e-6 && c.zoom < c.baseZoom * 0.74, 'air zoom ' + (c.zoom / c.baseZoom).toFixed(3));
   // suspension micro-bounce (±3 cm @ 3 Hz) barely moves the camera
   const s = new C(); s.setViewport(1280, 720); s.reset(0, 0);
   let lo = Infinity, hi = -Infinity;
@@ -932,6 +1106,51 @@ H.test('camera: base zoom, frame-rate independence, look-ahead, zoom-out, contai
   }
   H.assert(worstDip > -1.2, 'landing dip ' + worstDip.toFixed(2) + ' m');
   H.assert(settledBy !== null && settledBy < 0.8, 'settles quickly after landing: ' + settledBy);
+});
+
+H.test('camera framing: car ~15 % of the width, air zoom on ordinary jumps, portrait anchor and slope look', () => {
+  const C = RR.Camera;
+  const carW = 3.22; // trail buggy, rear hull to front bumper (m)
+  for (const [w, h] of [[1366, 768], [1920, 1080], [844, 390], [740, 360]]) {
+    const c = new C(); c.setViewport(w, h);
+    const pct = 100 * carW * c.baseZoom / w;
+    H.assert(pct >= 14 && pct <= 17, w + 'x' + h + ' car is ' + pct.toFixed(1) + '% of the width');
+  }
+  // an ordinary 1.8 s jump, 5 m up: ≥ 8 % extra zoom-out (was ~4 %: the height term needed ~10 m)
+  const a = new C(); a.setViewport(1366, 768); a.reset(0, 0);
+  let x = 0;
+  for (let i = 0; i < 300; i++) { x += 18 / 60; a.update(1 / 60, { x, y: 0, vx: 18, vy: 0, airTime: 0, heightAboveGround: 0.9 }, {}); }
+  const z0 = a.zoom;
+  let zMin = z0;
+  for (let i = 0; i < 108; i++) {
+    const t = i / 60, hag = 0.9 + 5 * Math.sin(Math.PI * t / 1.8);
+    x += 18 / 60;
+    a.update(1 / 60, { x, y: hag, vx: 18, vy: 0, airTime: t, heightAboveGround: hag }, {});
+    zMin = Math.min(zMin, a.zoom);
+  }
+  H.assert((z0 - zMin) / a.baseZoom >= 0.08, 'air zoom on a 1.8 s / 5 m jump: ' + (100 * (z0 - zMin) / a.baseZoom).toFixed(1) + '%');
+  // portrait: the car sits at ~52 % of the part of the screen the touch controls leave visible
+  const run = (vx, vy, inset) => {
+    const c = new C(); c.setViewport(390, 844);
+    if (inset !== undefined) c.bottomInset = inset;
+    c.reset(0, 0);
+    let px = 0, py = 0;
+    for (let i = 0; i < 300; i++) { px += vx / 60; py += vy / 60; c.update(1 / 60, { x: px, y: py, vx, vy, airTime: 0 }, {}); }
+    const sc = c.worldToScreen(px, py);
+    return { y: sc.y, x: sc.x, c };
+  };
+  const flat = run(10, 0), climb = run(10, 5), descent = run(10, -5), noInset = run(10, 0, 0);
+  H.assert(Math.abs(flat.y - 0.52 * (844 - 130)) < 12, 'portrait anchor y ' + flat.y.toFixed(0));
+  H.assert(Math.abs(noInset.y - 0.52 * 844) < 12, 'bottomInset override y ' + noInset.y.toFixed(0));
+  H.assert(climb.y > flat.y + 30 && descent.y < flat.y - 30, 'portrait view leans along the slope: ' + [descent.y, flat.y, climb.y].map((v) => v.toFixed(0)).join(' / '));
+  H.assert(flat.x > 0.2 * 390, 'portrait car ≥ 20 % from the left: ' + (flat.x / 390).toFixed(2));
+  const land = new C(); land.setViewport(1366, 768); land.reset(0, 0);
+  H.assert(Math.abs(land.worldToScreen(0, 0).y - 768 * 0.56) < 2, 'landscape keeps the car slightly below the middle');
+  // an explicit slopeAhead from the caller wins over the velocity estimate
+  const sa = new C(); sa.setViewport(390, 844); sa.reset(0, 0);
+  let sx = 0;
+  for (let i = 0; i < 300; i++) { sx += 10 / 60; sa.update(1 / 60, { x: sx, y: 0, vx: 10, vy: 0, airTime: 0, slopeAhead: 0.6 }, {}); }
+  H.assert(sa.worldToScreen(sx, 0).y > flat.y + 30, 'slopeAhead input lifts the view');
 });
 
 H.test('camera: shake decays, respects reducedMotion; transforms round-trip; bounds', () => {

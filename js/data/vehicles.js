@@ -16,6 +16,10 @@
  *  - special.force is the `controls.boost` value Run should apply while the special is active
  *    (1 ⇒ ≈ 0.9 g of forward thrust along the chassis).
  *  - describeUpgrade() also returns {detail, amount}; displayStats() values are floats in 0..10.
+ *  - (review fixes) describeUpgrade(vehicleId, catId, level, upgrades?) describes `catId` at `level` with the
+ *    OTHER categories at the player's levels (4th argument, else RR.Save.data.upgrades[vehicleId], else stock),
+ *    so the ENGINE/TIRES top speed and the next-level preview match the real car. TIRES now headlines
+ *    'Snow grip' ('NN% of dry'); its detail carries rolling resistance vs stock tyres and the top speed.
  *  - RR.Vehicles.CAT_MULT and RR.Vehicles.indexOf(id) are exported for convenience.
  *  - (integration balance pass) Fuel: an engine that is running burns `idleBurn` all the time (also in
  *    the air) plus `burnRate × |throttle|`. Measured with a competent driver the cars travel ~20 m/s and
@@ -391,12 +395,21 @@
   const fmt1 = (v) => (Math.round(v * 10) / 10).toFixed(1);
   const fmt2 = (v) => (Math.round(v * 100) / 100).toFixed(2);
 
-  // Human-readable value of one category at `level` (other categories stock).
-  function describeUpgrade(vehicleId, catId, level) {
+  // Human-readable value of one category at `level`, with every OTHER category at the player's current levels:
+  // `upgrades` ({engine..brakes}) when given, else the saved upgrades for this vehicle (RR.Save), else stock.
+  // (Top speed depends on ENGINE and TIRES together, so describing a category with the others stock showed
+  // the wrong numbers; the preview for level+1 now equals what the car really gets after buying it.)
+  function describeUpgrade(vehicleId, catId, level, upgrades) {
     if (!byId(vehicleId) || CAT_IDS.indexOf(catId) < 0) return { stat: '—', value: '—', detail: '', amount: 0 };
     const lv = levelOf({ [catId]: level }, catId);
-    const t = getTuned(vehicleId, { [catId]: lv });
-    const stock = lv === 1 ? t : getTuned(vehicleId, null);
+    let base = upgrades && typeof upgrades === 'object' ? upgrades : null;
+    if (!base) {
+      const S = RR.Save && RR.Save.data && RR.Save.data.upgrades;
+      base = (S && S[vehicleId] && typeof S[vehicleId] === 'object' && S[vehicleId]) || null;
+    }
+    const t = getTuned(vehicleId, Object.assign({}, base, { [catId]: lv }));
+    // reference for the TIRES rolling-resistance %: same car with stock tyres
+    const stock = catId === 'tires' ? getTuned(vehicleId, Object.assign({}, base, { tires: 1 })) : t;
     switch (catId) {
       case 'engine':
         return { stat: 'Torque', value: U.formatInt(t.motor.torque) + ' Nm',
@@ -410,9 +423,9 @@
         const snow = (RR.SURFACES && RR.SURFACES.snow && RR.SURFACES.snow.friction) || 0.62;
         const snowPct = Math.round(U.lerp(snow, 1, t.surfaceAdapt * 0.5) * 100);
         const roll = Math.round((1 - t.rollingResistance / stock.rollingResistance) * 100);
-        return { stat: 'Top speed', value: kmh(t.topSpeed) + ' km/h',
-          detail: 'Snow grip ' + snowPct + '% of dry' + (roll > 0 ? ' · rolling resistance −' + roll + '%' : ''),
-          amount: t.topSpeed };
+        return { stat: 'Snow grip', value: snowPct + '% of dry',
+          detail: (roll > 0 ? 'Rolling resistance −' + roll + '% · ' : '') + 'top speed ' + kmh(t.topSpeed) + ' km/h',
+          amount: U.lerp(snow, 1, t.surfaceAdapt * 0.5) };
       }
       case 'fuel':
         return { stat: 'Tank', value: Math.round(t.fuel.capacity) + ' L · ' + fmt1(t.fuel.burnRate + t.fuel.idleBurn) + ' L/s',

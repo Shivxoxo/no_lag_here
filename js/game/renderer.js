@@ -35,6 +35,27 @@
  *    engine shimmy; run.crashTime is not required (the flash is timed from the state change).
  *  - If run.camera has setViewport() and its viewport differs from the canvas size, drawRun() syncs it so
  *    worldToScreen() matches the world transform.
+ *
+ * Adaptive quality (review visuals-3) — the game is fill-bound, so resolution is the lever:
+ *  - Backing store = CSS size × min(devicePixelRatio, cap) × renderScale; caps low 1 / medium 1.25 / high 2;
+ *    LOW renders at renderScale 0.75. r.dpr is the EFFECTIVE backing ratio every transform uses (so
+ *    canvas.width === round(r.w × r.dpr) always); r.deviceRatio = min(devicePixelRatio, cap).
+ *  - Dynamic resolution (on by default): drawRun() keeps an EMA of the presented-frame interval; > 19 ms for
+ *    2 s steps renderScale down (1 → 0.85 → 0.7, and on hi-DPI screens → 0.6 → 0.5 but never below 1 backing
+ *    px per CSS px), < 15 ms for 5 s steps back up (the wait doubles, ≤ 60 s, when an upgrade is undone
+ *    within 8 s). Gaps > 0.25 s are ignored. The canvas is resized only on a step change.
+ *    r.setAutoQuality(bool), r.autoQuality, r.renderScale, r.frameStats() → {ema(ms), scale, step, quality,
+ *    setting, dpr, auto, suggested}. r.reportFrameTime(ms) lets the Game feed its own rAF intervals (the
+ *    internal timing then switches off). r.suggestedQuality: 'medium'/'low' when even the floor is too slow.
+ *  - r.setQuality('auto'): HIGH that may also step its quality down (high → medium → low) after the scale
+ *    ladder; r.quality is the quality actually rendered, r.qualitySetting what was asked. In 'auto' the
+ *    renderer keeps run.background / run.particles on r.quality itself and calls r.onQualityHint(q) (optional).
+ *    Re-applying the current quality is a no-op (the ladder is kept).
+ *  - LOW darkness: one gradient box + solid fills on the main canvas (no offscreen light map / upscale blit).
+ * Review fixes: the virtual wall left of terrain.minX is drawn as a rock cliff (visuals-1); MAGNET field
+ * rings + streaks on pulled coins and 2X COINS gold rim (VehicleArt opts.multiplier), both fading over the
+ * power-up's last 2 s (visuals-2); THE MOON section hides plant decorations (reads bg.moonW, visuals-4);
+ * neon billboards draw one of four neon motifs by variant (visuals-5).
  */
 (function () {
   'use strict';
@@ -44,8 +65,26 @@
   const isNum = U.isNum;
   const clamp = U.clamp;
   const DX = (RR.CONST && RR.CONST.TERRAIN_DX) || 0.5;
-  const DPR_CAP = { low: 1, medium: 1.5, high: 2 };
+  // Backing-store pixel ratio = min(devicePixelRatio, DPR_CAP[q]) × BASE_SCALE[q] × dynamic step.
+  // LOW renders at 75 % of the CSS size (the browser upscales the canvas): the game is fill-bound, so
+  // pixels are the cost that matters (review-perf: render JS stays ~1 ms while DSF 2 HIGH ran at 22 fps).
+  const DPR_CAP = { low: 1, medium: 1.25, high: 2 };
+  const BASE_SCALE = { low: 0.75, medium: 1, high: 1 };
+  // Dynamic resolution ladder for a fixed quality, and the longer ladder used by quality 'auto'
+  // (which may also step the quality itself down: fewer layers, particles, details).
+  // Steps below 0.7 are only used on hi-DPI screens, and never below 1 backing px per CSS px.
+  const AUTO_STEPS = [
+    { q: null, s: 1 }, { q: null, s: 0.85 }, { q: null, s: 0.7 }, { q: null, s: 0.6 }, { q: null, s: 0.5 }
+  ];
+  const AUTO_LADDER = [
+    { q: 'high', s: 1 }, { q: 'high', s: 0.85 }, { q: 'high', s: 0.7 },
+    { q: 'medium', s: 0.85 }, { q: 'low', s: 1 }, { q: 'low', s: 0.85 }
+  ];
+  const FT_SLOW = 0.019, FT_FAST = 0.015;   // EMA frame-interval thresholds (s)
+  const SLOW_HOLD = 2, FAST_HOLD = 5;       // seconds the EMA must stay past a threshold before a step
   const EMPTY = Object.freeze({});
+  // decoration types that are living plants / farm props — hidden inside a low-gravity MOON section
+  const LIVING = Object.freeze({ tree: 1, bush: 1, flowers: 1, fence: 1, pine: 1, pine_snow: 1, cactus: 1, tumbleweed: 1 });
 
   function makeCanvas(w, h) {
     try {
@@ -66,6 +105,15 @@
   function puActive(pu, id) {
     try { return !!(pu && typeof pu.isActive === 'function' && pu.isActive(id)); } catch (e) { return false; }
   }
+  // 0..1 strength of an active power-up: 1 while plenty is left, fading out over its last 2 s.
+  function puFade(pu, id) {
+    if (!puActive(pu, id)) return 0;
+    try {
+      const r = typeof pu.remaining === 'function' ? pu.remaining(id) : NaN;
+      return isNum(r) ? clamp(r / 2, 0, 1) : 1;
+    } catch (e) { return 1; }
+  }
+  const MAGNET_RADIUS = 9;   // collectibles.js MAGNET_R
   // fractional part in [0, 1) — safe for negative inputs (unlike `% 1`), so derived radii never go negative
   const frac = (v) => { const f = v - Math.floor(v); return f === f ? f : 0; };
   // 0..1 hash of an integer cell (deterministic per world x → no shimmer while scrolling)
@@ -526,26 +574,91 @@
       ctx.globalCompositeOperation = 'source-over';
       additive(ctx, '#ffd98a', x + 0.65 * s, y + hg + 0.05 * s, 0.9 * s, 0.85);
     },
+    // Neon billboard: dark panel, neon frame, and one of four stroked neon motifs picked by the variant —
+    // 'RR' monogram, car-over-mountain silhouette, scrolling glyph rows, chevron arrows. Each element
+    // flickers on its own phase. Additive strokes, no shadowBlur (a soft glow sprite behind instead).
     billboard(ctx, x, y, s, v, t, C) {
       const w = 3.2 * s, hb = 1.6 * s, by = y + 2.2 * s;
       ctx.fillStyle = '#2f1864';
       ctx.fillRect(x - w * 0.35, y - 0.1, 0.14 * s, 2.3 * s);
       ctx.fillRect(x + w * 0.3, y - 0.1, 0.14 * s, 2.3 * s);
-      ctx.fillStyle = v & 1 ? '#ff2fd0' : '#6a1a9a';
+      ctx.fillStyle = '#140a2e';
       ctx.fillRect(x - w / 2, by, w, hb);
-      ctx.fillStyle = v & 1 ? '#ffe45c' : '#1ff2ff';
-      ctx.beginPath();
-      disc(ctx, x - w * 0.25, by + hb * 0.5, hb * 0.3);
-      ctx.fill();
-      ctx.fillRect(x, by + hb * 0.55, w * 0.35, hb * 0.12);
-      ctx.fillRect(x, by + hb * 0.3, w * 0.25, hb * 0.1);
+      const c1 = BB_COLS[v & 3], c2 = BB_COLS[(v + 2) & 3];
+      const fl = (k) => (Math.sin(t * 11 + k * 3.7 + x) > -0.9 ? 1 : 0.2) * (0.82 + 0.18 * Math.sin(t * (2.3 + k) + v));
+      additive(ctx, c1, x, by + hb * 0.5, w * 0.55, 0.3 * fl(0));
+      const cx = x, cy = by + hb * 0.5;
       ctx.globalCompositeOperation = 'lighter';
-      ctx.strokeStyle = '#1ff2ff';
-      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(t * 4 + x);
-      ctx.lineWidth = 0.08 * s;
-      ctx.strokeRect(x - w / 2, by, w, hb);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      // frame
+      ctx.strokeStyle = c1;
+      ctx.globalAlpha = 0.85 * fl(1);
+      ctx.lineWidth = 0.07 * s;
+      ctx.strokeRect(x - w / 2 + 0.06 * s, by + 0.06 * s, w - 0.12 * s, hb - 0.12 * s);
+      ctx.strokeStyle = c2;
+      ctx.lineWidth = 0.09 * s;
+      ctx.globalAlpha = fl(2);
+      ctx.beginPath();
+      const u = hb * 0.28;                      // motif unit
+      switch (v & 3) {
+        case 0: // 'RR' monogram
+          for (let k = 0; k < 2; k++) {
+            const ox = cx + (k ? 0.25 : -0.95) * u * 1.6;
+            ctx.moveTo(ox, cy - u); ctx.lineTo(ox, cy + u);
+            ctx.lineTo(ox + u * 0.9, cy + u); ctx.quadraticCurveTo(ox + u * 1.4, cy + u * 0.5, ox + u * 0.9, cy);
+            ctx.lineTo(ox, cy); ctx.moveTo(ox + u * 0.45, cy); ctx.lineTo(ox + u * 1.15, cy - u);
+          }
+          break;
+        case 1: { // buggy jumping a hill crest, with speed lines
+          ctx.moveTo(cx - w * 0.42, cy - u * 1.05);
+          ctx.quadraticCurveTo(cx - w * 0.2, cy + u * 1.1, cx + w * 0.02, cy - u * 1.05);
+          const k = u * 0.95, a = 0.22, ca = Math.cos(a) * k, sa = Math.sin(a) * k;
+          const ox = cx + w * 0.2, oy = cy + u * 0.1;
+          const P = (px, py, o) => { o[0] = ox + px * ca - py * sa; o[1] = oy + px * sa + py * ca; return o; };
+          const q = BB_Q;
+          P(BB_CAR[0], BB_CAR[1], q); ctx.moveTo(q[0], q[1]);
+          for (let i = 2; i < BB_CAR.length; i += 2) { P(BB_CAR[i], BB_CAR[i + 1], q); ctx.lineTo(q[0], q[1]); }
+          ctx.closePath();
+          for (let i = 0; i < 2; i++) {
+            P(i ? 0.66 : -0.62, -0.08, q);
+            ctx.moveTo(q[0] + 0.3 * k, q[1]); ctx.arc(q[0], q[1], 0.3 * k, 0, TAU);
+          }
+          for (let i = 0; i < 3; i++) {
+            const ly = oy + (0.55 - i * 0.4) * k;
+            ctx.moveTo(ox - (1.35 + 0.15 * i) * k, ly); ctx.lineTo(ox - (1.9 + 0.35 * i) * k, ly - 0.08 * k);
+          }
+          break;
+        }
+        case 2: { // fake glyph rows (short strokes), scrolling slowly
+          const rows = 3, cols = 9;
+          const shift = Math.floor(t * 1.5);
+          for (let r = 0; r < rows; r++) {
+            const ry = cy + (1 - r) * u * 0.9;
+            for (let c = 0; c < cols; c++) {
+              const hh = h01(c + shift * (r === 1 ? 1 : 0), r * 31 + v);
+              if (hh < 0.18) continue;
+              const gx = cx - w * 0.4 + c * (w * 0.8 / cols);
+              const gl = w * 0.8 / cols * (0.35 + 0.45 * hh);
+              ctx.moveTo(gx, ry); ctx.lineTo(gx + gl, ry);
+              if (hh > 0.7) { ctx.moveTo(gx + gl * 0.5, ry - u * 0.3); ctx.lineTo(gx + gl * 0.5, ry + u * 0.3); }
+            }
+          }
+          break;
+        }
+        default: { // chevron arrows chasing to the right
+          const ph = frac(t * 1.2);
+          for (let k = 0; k < 3; k++) {
+            const ax = cx - w * 0.3 + ((k + ph) / 3) * w * 0.6;
+            ctx.moveTo(ax - u * 0.5, cy + u); ctx.lineTo(ax + u * 0.3, cy); ctx.lineTo(ax - u * 0.5, cy - u);
+          }
+          break;
+        }
+      }
+      ctx.stroke();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
+      ctx.lineCap = 'butt';
     },
     tower(ctx, x, y, s, v, t, C) {
       const hg = 7 * s, w = 0.9 * s;
@@ -636,6 +749,9 @@
     }
   };
   const FLOWER_COLS = ['#ffd34d', '#ff6fa8', '#ffffff', '#b28bff'];
+  const BB_COLS = ['#1ff2ff', '#ff2fd0', '#ffe45c', '#7dff6a'];
+  const BB_CAR = [-1, 0.05, -0.92, 0.38, -0.25, 0.42, 0.05, 0.8, 0.52, 0.8, 0.72, 0.38, 1.05, 0.26, 1.02, 0.05];
+  const BB_Q = [0, 0];
   const LAVA_ROCK = Object.freeze({ rock: '#2e2020', rockLight: '#4a3432', rockDark: '#1a1010' });
   const CAIRN = [0.55, 0.42, 0.32, 0.22];
   const ICE_SHARDS = [-0.35, 1.1, 0.14, 0.05, 1.6, 0.18, 0.4, 1.0, 0.13, -0.1, 0.7, 0.1];
@@ -658,7 +774,18 @@
       try { ctx = canvas && canvas.getContext ? (canvas.getContext('2d', { alpha: false }) || canvas.getContext('2d')) : null; } catch (e) { ctx = null; }
       this.ctx = ctx;
       this.w = 0; this.h = 0; this.dpr = 1;
-      this.quality = 'high';
+      this.quality = 'high';            // quality actually rendered ('low'|'medium'|'high')
+      this.qualitySetting = 'high';     // what setQuality() was given (may be 'auto')
+      this.deviceRatio = 1;             // min(devicePixelRatio, cap) — before render scaling
+      this.renderScale = 1;             // backing / (CSS × deviceRatio): BASE_SCALE × dynamic step
+      this.autoQuality = true;          // dynamic resolution on (setAutoQuality)
+      this.suggestedQuality = null;     // set when even the lowest step is too slow (fixed quality)
+      this.onQualityHint = null;        // optional callback(q) when the dynamic ladder changes quality
+      this._autoStep = 0;
+      this._ftEma = 0; this._ftN = 0; this._slowT = 0; this._fastT = 0; this._floorT = 0;
+      this._upWait = FAST_HOLD; this._lastUpAt = -100; this._monClock = 0;
+      this._extMonitor = false;
+      this._moonW = 0;
       this.time = 0;
       this._clock = 0;
       this._lastNow = 0;
@@ -667,6 +794,7 @@
       this._xs = null; this._ys = null; this._sf = null;
       this._ensureCap(1024);
       this._range = [0, 0];
+      this._nPts = 0; this._nWall = 0;
       this._b = { left: 0, right: 0, bottom: 0, top: 0 };
       this._p = { x: 0, y: 0 };
       this._lamp = { x: 0, y: 0, angle: 0 };
@@ -676,7 +804,8 @@
       this._nLabels = 0;
       this._best = { on: false, x: 0, y: 0 };
       this._strNoise = U.makeNoise1D(0x51a7a);
-      this._vopts = { boost: false, shield: false, thruster: false, crashed: false, headlights: false, throttle: 0, lean: 0 };
+      this._vopts = { boost: false, shield: false, thruster: false, crashed: false, headlights: false, throttle: 0, lean: 0,
+        magnet: 0, multiplier: 0, quality: 'high' };
       this._dark = null; this._darkCtx = null; this._darkKey = '';
       this._unitRadial = null; this._coneGrad = null; this._gradCtx = null;
       this._vig = null; this._vigKey = '';
@@ -697,9 +826,118 @@
       this._cap = cap;
     }
 
+    // q: 'low' | 'medium' | 'high' | 'auto' (= HIGH that may also step its quality down when slow).
+    // Resets the dynamic-resolution ladder. Unknown values fall back to 'high'.
     setQuality(q) {
-      this.quality = DPR_CAP[q] ? q : 'high';
+      const want = q === 'auto' || DPR_CAP[q] ? q : 'high';
+      // the Game re-applies every setting on any settings change: keep the ladder when nothing changed
+      if (want === this.qualitySetting) { this.resize(); return; }
+      this.qualitySetting = want;
+      this.quality = q === 'auto' ? 'high' : this.qualitySetting;
+      this._autoStep = 0;
+      this.suggestedQuality = null;
+      this._resetMonitor();
+      this._upWait = FAST_HOLD;
+      this._applyStep();
       this.resize();
+    }
+
+    // Dynamic resolution on/off (default on). Off → renders at the full quality scale.
+    setAutoQuality(on) {
+      this.autoQuality = on !== false;
+      if (!this.autoQuality && this._autoStep !== 0) {
+        this._autoStep = 0;
+        this._applyStep();
+        this.resize();
+      }
+      this._resetMonitor();
+    }
+
+    // Optional external frame-time feed (ms between presented frames, e.g. from the Game's rAF loop).
+    // Once called, the renderer stops timing drawRun() itself so frames are not counted twice.
+    reportFrameTime(ms) {
+      this._extMonitor = true;
+      this._monitor(U.safeNum(ms, 0) / 1000);
+    }
+
+    // Snapshot for debugging / a settings readout.
+    frameStats() {
+      return { ema: this._ftEma * 1000, scale: this.renderScale, step: this._autoStep, quality: this.quality,
+        setting: this.qualitySetting, dpr: this.dpr, auto: this.autoQuality, suggested: this.suggestedQuality };
+    }
+
+    _ladder() { return this.qualitySetting === 'auto' ? AUTO_LADDER : AUTO_STEPS; }
+
+    // Number of usable ladder steps on this screen (fixed quality: s ≥ 0.7, or down to 1.0 backing px per
+    // CSS px on hi-DPI screens, where that is still as sharp as a normal display).
+    _ladderLen() {
+      const L = this._ladder();
+      if (L !== AUTO_STEPS) return L.length;
+      const raw = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
+      const dev = Math.min(raw, DPR_CAP[this.quality] || 2);
+      const minS = Math.min(0.7, 1 / dev) - 1e-6;
+      let n = 0;
+      while (n < L.length && L[n].s >= minS) n++;
+      return Math.max(1, n);
+    }
+
+    _applyStep() {
+      const L = this._ladder();
+      const st = L[clamp(this._autoStep, 0, L.length - 1)];
+      const prevQ = this.quality;
+      if (st.q) this.quality = st.q;
+      this.renderScale = (BASE_SCALE[this.quality] || 1) * st.s;
+      if (this.quality !== prevQ && typeof this.onQualityHint === 'function') {
+        try { this.onQualityHint(this.quality); } catch (e) { this._logOnce('onQualityHint', e); }
+      }
+    }
+
+    _resetMonitor() { this._ftEma = 0; this._ftN = 0; this._slowT = 0; this._fastT = 0; this._floorT = 0; }
+
+    // Frame-interval monitor → dynamic resolution. EMA of the presented-frame interval; > 19 ms for 2 s
+    // steps the render scale down (1 → 0.85 → 0.7), < 15 ms for 5 s steps back up. An upgrade that is
+    // undone within 8 s doubles the next wait (≤ 60 s) so a borderline machine does not oscillate.
+    // Gaps > 0.25 s (pause, hidden tab, on-demand frames) are ignored.
+    _monitor(dt) {
+      if (!this.autoQuality) return;
+      if (!(dt > 0) || dt > 0.25) { this._ftN = 0; this._slowT = 0; this._fastT = 0; return; }
+      this._monClock += dt;
+      this._ftEma = this._ftN === 0 ? dt : this._ftEma + (dt - this._ftEma) * 0.08;
+      this._ftN++;
+      if (this._ftN < 20) return;                       // let the EMA settle first
+      const nSteps = this._ladderLen();
+      if (this._autoStep > nSteps - 1) { this._autoStep = nSteps - 1; this._changeStep(); return; }   // DPR changed
+      if (this._ftEma > FT_SLOW) {
+        this._slowT += dt; this._fastT = 0;
+        if (this._slowT >= SLOW_HOLD) {
+          this._slowT = 0;
+          if (this._autoStep < nSteps - 1) {
+            if (this._monClock - this._lastUpAt < 8) this._upWait = Math.min(60, this._upWait * 2);
+            this._autoStep++;
+            this._changeStep();
+          } else if (this.qualitySetting !== 'auto' && this.quality !== 'low') {
+            this._floorT += SLOW_HOLD;
+            if (this._floorT >= 4) this.suggestedQuality = this.quality === 'high' ? 'medium' : 'low';
+          }
+        }
+      } else if (this._ftEma < FT_FAST) {
+        this._fastT += dt; this._slowT = 0; this._floorT = 0;
+        if (this._fastT >= this._upWait && this._autoStep > 0) {
+          this._fastT = 0;
+          this._autoStep--;
+          this._lastUpAt = this._monClock;
+          this._changeStep();
+        }
+      } else {
+        this._slowT = Math.max(0, this._slowT - dt);
+        this._fastT = Math.max(0, this._fastT - dt);
+      }
+    }
+
+    _changeStep() {
+      this._applyStep();
+      this.resize();
+      this._ftN = 0;                                     // re-measure at the new scale
     }
 
     resize() {
@@ -713,7 +951,10 @@
       }
       cw = Math.max(1, Math.round(cw)); ch = Math.max(1, Math.round(ch));
       const raw = typeof devicePixelRatio === 'number' && devicePixelRatio > 0 ? devicePixelRatio : 1;
-      const dpr = Math.min(raw, DPR_CAP[this.quality] || 2);
+      const dev = Math.min(raw, DPR_CAP[this.quality] || 2);
+      // effective backing ratio (what every transform uses); CSS size of the canvas is unchanged
+      const dpr = Math.max(0.25, Math.round(dev * clamp(U.safeNum(this.renderScale, 1), 0.25, 1) * 1000) / 1000);
+      this.deviceRatio = dev;
       if (cw === this.w && ch === this.h && dpr === this.dpr && c.width === Math.round(cw * dpr)) return false;
       this.w = cw; this.h = ch; this.dpr = dpr;
       c.width = Math.round(cw * dpr);
@@ -752,8 +993,12 @@
       if (!(this.w > 0)) this.resize();
       // clocks: animation follows run.time when present (freezes while paused)
       const now = typeof performance !== 'undefined' && performance.now ? performance.now() / 1000 : Date.now() / 1000;
-      const rdt = this._lastNow ? clamp(now - this._lastNow, 0, 0.1) : 1 / 60;
+      const rawDt = this._lastNow ? now - this._lastNow : 0;
+      const rdt = this._lastNow ? clamp(rawDt, 0, 0.1) : 1 / 60;
       this._lastNow = now;
+      if (!this._extMonitor) this._monitor(rawDt);
+      // 'auto' quality: keep the run's background / particles on the quality the ladder picked
+      if (this.qualitySetting === 'auto') this._syncRunQuality(run);
       this._clock += rdt;
       const t = isNum(run.time) ? run.time : this._clock;
       this.time = t;
@@ -777,6 +1022,8 @@
       // ---- sky
       this.screenTransform();
       const bg = this._backgroundFor(run, world, cam, env, rdt);
+      // MOON-section blend (eased by the background; 0 on moon_base itself)
+      this._moonW = bg && isNum(bg.moonW) ? clamp(bg.moonW, 0, 1) : 0;
       const terrain = run.terrain;
       // sample terrain first: its lowest visible point tells the background where it can stop painting
       const minGround = terrain ? this._sampleTerrain(terrain, C, b, cam.zoom || 40) : NaN;
@@ -835,6 +1082,15 @@
       this._drawVignettes(ctx, run, t);
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
+    }
+
+    _syncRunQuality(run) {
+      const q = this.quality;
+      const bg = run.background, p = run.particles;
+      try {
+        if (bg && typeof bg.setQuality === 'function' && bg.quality !== q) bg.setQuality(q);
+        if (p && typeof p.setQuality === 'function' && p.quality !== q) p.setQuality(q);
+      } catch (e) { this._logOnce('syncQuality', e); }
     }
 
     // Fraction (0..1) of the view that has a cave ceiling above it (9 probes).
@@ -956,6 +1212,7 @@
     _sampleTerrain(T, C, b, zoom) {
       this._nPts = 0;
       if (typeof T.getIndexRange !== 'function' || typeof T.pointY !== 'function') return NaN;
+      this._nWall = 0;
       const r = T.getIndexRange(b.left - 1.5, b.right + 1.5, this._range);
       let i0 = r[0] | 0, i1 = r[1] | 0;
       if (!(i1 > i0)) return NaN;
@@ -963,6 +1220,15 @@
       const pxPer = zoom * DX;
       let step = Math.max(1, Math.ceil(3 / Math.max(0.1, pxPer)));
       if (this.quality === 'low') step *= 2;
+      // Left of the trimmed window (T.minX) terrain keeps a virtual rock wall that physics collides with
+      // (pointY/heightAt return it). getIndexRange clamps to stored samples, so extend the range to the view
+      // edge here, aligned so a sample lands exactly on minX (sharp foot of the cliff).
+      const want = Math.floor((b.left - 1.5) / DX);
+      if (want < i0 && isNum(T.minX) && Math.abs(i0 * DX - T.minX) < DX * 0.51) {
+        const k = Math.ceil((i0 - want) / step);
+        this._nWall = k;
+        i0 -= k * step;
+      }
       const n = Math.floor((i1 - i0) / step) + 2;
       this._ensureCap(n + 2);
       const xs = this._xs, ys = this._ys, sf = this._sf;
@@ -976,7 +1242,7 @@
         xs[k] = px ? T.pointX(i) : i * DX;
         const y = T.pointY(i);
         ys[k] = isNum(y) ? y : (k > 0 ? ys[k - 1] : 0);
-        sf[k] = hasSurf ? T.surfaceIdx(i) : mainIdx;
+        sf[k] = k < this._nWall ? WALL_SURF : (hasSurf ? T.surfaceIdx(i) : mainIdx);
         k++;
         if (i === i1) break;
       }
@@ -1023,7 +1289,10 @@
         ctx.globalAlpha = 1;
       }
       // 2. pebbles (hashed per 1.1 m cell of world x → stable while scrolling)
-      if (this.quality !== 'low') this._drawPebbles(ctx, C, xs[0], xs[N - 1], bottom);
+      const nw = Math.min(this._nWall, N - 1);
+      if (this.quality !== 'low') this._drawPebbles(ctx, C, xs[nw], xs[N - 1], bottom);
+      // 2b. rock cliff where the trimmed terrain's virtual wall is in view (matches the collision wall)
+      if (nw > 0) this._drawCliff(ctx, C, nw, bottom, zoom);
 
       // 3. surface band per run (lava handled separately)
       const lavaIdx = keys.indexOf('lava');
@@ -1034,7 +1303,9 @@
         let e = a;
         while (e < N - 1 && sf[e + 1] === si) e++;
         const end = Math.min(N - 1, e + 1);            // include the next point so runs join seamlessly
-        if (si === lavaIdx) {
+        if (si === WALL_SURF) {
+          // cliff face: drawn by _drawCliff (no grass band, no decorations)
+        } else if (si === lavaIdx) {
           if (this._nLava < 16) {
             const L = this._lava, o = this._nLava * 3;
             L[o] = xs[a]; L[o + 1] = xs[end]; L[o + 2] = ys[a];
@@ -1049,6 +1320,75 @@
       }
       // 4. lava pools
       for (let q = 0; q < this._nLava; q++) this._drawLava(ctx, q, C, t);
+    }
+
+    // Rock cliff over samples [0, nw] (the virtual wall left of T.minX): solid rock face in the world's
+    // rock colour that plunges into the ground just right of the foot, hashed ledges/cracks, dark outline.
+    _drawCliff(ctx, C, nw, bottom, zoom) {
+      const xs = this._xs, ys = this._ys;
+      const fx = xs[nw], fy = ys[nw];
+      ctx.fillStyle = C.rock;
+      ctx.beginPath();
+      ctx.moveTo(xs[0], bottom);
+      for (let j = 0; j <= nw; j++) ctx.lineTo(xs[j], ys[j]);
+      // the rock mass buries itself under the soil to the right of the foot (jagged, stable edge)
+      ctx.lineTo(fx + 0.35, fy - 0.25);
+      ctx.lineTo(fx + 0.2, fy - 1.1);
+      ctx.lineTo(fx + 0.9, fy - 2.2);
+      ctx.lineTo(fx + 0.6, fy - 3.6);
+      ctx.lineTo(fx + 1.4, Math.max(bottom, fy - 5.5));
+      ctx.lineTo(fx + 1.4, bottom);
+      ctx.closePath();
+      ctx.fill();
+      // sedimentary bands across the face (hashed per 0.9 m of height → no shimmer while scrolling)
+      const y1 = ys[0];
+      const c0 = Math.floor((fy - 6) / 0.9), c1 = Math.ceil(y1 / 0.9);
+      ctx.strokeStyle = C.rockDark;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = Math.max(0.04, 2 / zoom);
+      ctx.beginPath();
+      for (let c = c0; c <= c1; c++) {
+        const hsh = h01(c, 0xc11f);
+        const ly = c * 0.9 + hsh * 0.25;
+        if (ly > y1) continue;
+        const wx = Math.min(fx + 0.2, fx - (ly - fy) / 3);   // face x at this height (wall slope 3)
+        ctx.moveTo(xs[0] - 1, ly + 0.1 * Math.sin(c * 1.7));
+        ctx.lineTo(U.lerp(xs[0], wx, 0.5), ly - 0.12 + 0.1 * hsh);
+        ctx.lineTo(wx - 0.05, ly);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      // sunlit rim just inside the face
+      ctx.fillStyle = C.rockLight;
+      ctx.beginPath();
+      ctx.moveTo(xs[0], ys[0]);
+      for (let j = 1; j <= nw; j++) ctx.lineTo(xs[j], ys[j]);
+      for (let j = nw; j >= 0; j--) ctx.lineTo(xs[j] - 0.3, ys[j] - 0.1);
+      ctx.closePath();
+      ctx.fill();
+      // dark notches cut into the face at hashed heights
+      ctx.fillStyle = C.rockDark;
+      ctx.beginPath();
+      for (let c = Math.ceil(fy / 0.7); c <= Math.ceil(y1 / 0.7); c++) {
+        const hsh = h01(c, 0xc120);
+        if (hsh < 0.35) continue;
+        const ly = c * 0.7 + hsh * 0.3;
+        const wx = fx - (ly - fy) / 3;
+        const d = 0.3 + hsh * 0.5;
+        ctx.moveTo(wx + 0.02, ly + 0.06);
+        ctx.lineTo(wx - d, ly - 0.05);
+        ctx.lineTo(wx - 0.08, ly - 0.24);
+        ctx.closePath();
+      }
+      ctx.fill();
+      // dark edge stroke along the cliff profile (reads as a hard rock edge, not ground)
+      ctx.strokeStyle = C.rockDark;
+      ctx.lineWidth = Math.max(0.05, 2.4 / zoom);
+      ctx.beginPath();
+      ctx.moveTo(xs[0], ys[0]);
+      for (let j = 1; j <= nw; j++) ctx.lineTo(xs[j], ys[j]);
+      ctx.lineTo(fx + 0.35, fy - 0.25);
+      ctx.stroke();
     }
 
     _traceFill(ctx, a, e, off, bottom) {
@@ -1371,6 +1711,8 @@
       while (lo < hi) { const mid = (lo + hi) >> 1; if (ds[mid].x < left) lo = mid + 1; else hi = mid; }
       const right = b.right + 9;
       const C = worldColors(world);
+      // inside a low-gravity MOON section (non-moon worlds) trees, bushes, flowers, fences… fade out
+      const live = 1 - this._moonW;
       for (let i = lo; i < ds.length; i++) {
         const d = ds[i];
         if (!d || d.x > right) break;
@@ -1378,6 +1720,13 @@
         if (d.y > b.top + 1 || d.y < b.bottom - 12) continue;
         const fn = DECOR[d.type] || DECOR.rock;
         const s = clamp(U.safeNum(d.scale, 1), 0.2, 3);
+        if (live < 1 && LIVING[d.type]) {
+          if (live <= 0.01) continue;
+          ctx.globalAlpha = live;
+          fn(ctx, d.x, d.y, s, (d.variant | 0) & 3, t, C, world);
+          ctx.globalAlpha = 1;
+          continue;
+        }
         fn(ctx, d.x, d.y, s, (d.variant | 0) & 3, t, C, world);
       }
       ctx.globalAlpha = 1;
@@ -1413,6 +1762,10 @@
       o.boost = !!run.boostActive || puActive(pu, 'boost');
       o.shield = puActive(pu, 'shield');
       o.thruster = !!(run.specialActive || run.thrusterActive);
+      o.magnet = o.crashed ? 0 : puFade(pu, 'magnet');
+      o.multiplier = o.crashed ? 0 : puFade(pu, 'multiplier');
+      o.quality = this.quality;
+      if (o.magnet > 0) this._drawMagnet(ctx, run, body, t, o.magnet);
       const env = run.env || EMPTY;
       const world = run.world || EMPTY;
       o.headlights = clamp(U.safeNum(env.darkness, U.safeNum(world.darkness, 0)), 0, 1) > 0.22;
@@ -1422,6 +1775,58 @@
       try {
         art.draw(ctx, body, run.tuned || body.tuned || {}, run.colors || (run.vehicleDef && run.vehicleDef.colors) || null, t, o);
       } catch (e) { this._logOnce('vehicle', e); }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // MAGNET: 2–3 thin pulsing field rings (red / blue) expanding from the chassis to the pull radius,
+    // plus a tapered streak behind every coin currently being pulled in. LOW: a single ring.
+    _drawMagnet(ctx, run, body, t, k) {
+      const cx = body.x, cy = body.y + 0.2;
+      const low = this.quality === 'low';
+      const nr = low ? 1 : 3;
+      ctx.lineWidth = low ? 0.08 : 0.09;
+      for (let i = 0; i < nr; i++) {
+        const ph = frac(t * 0.55 + i / nr);
+        const r = 1.5 + (MAGNET_RADIUS - 1.5) * ph;
+        const a = 0.34 * k * Math.sin(ph * Math.PI) * (low ? 1.2 : 1);
+        if (a <= 0.01) continue;
+        ctx.strokeStyle = i & 1 ? '#4fa8ff' : '#ff4f6d';
+        ctx.globalAlpha = a;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      // streaks on pulled coins (collectibles state 1 = MAGNET flight)
+      const col = run.collectibles;
+      const coins = col && Array.isArray(col.coins) ? col.coins : null;
+      if (!coins) return;
+      const R2 = (MAGNET_RADIUS + 1) * (MAGNET_RADIUS + 1);
+      let lo = col._heads && isNum(col._heads.coins) ? col._heads.coins : 0, hi = coins.length;
+      const left = cx - MAGNET_RADIUS - 1;
+      while (lo < hi) { const mid = (lo + hi) >> 1; const it = coins[mid]; if (it && it.x < left) lo = mid + 1; else hi = mid; }
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = '#ffe27a';
+      ctx.beginPath();
+      let any = false;
+      for (let i = Math.max(0, lo - 8); i < coins.length; i++) {
+        const it = coins[i];
+        if (!it) continue;
+        if (it.x > cx + MAGNET_RADIUS + 1) break;
+        if (it.state !== 1) continue;
+        const dx = cx - it.x, dy = cy - it.y, d2 = dx * dx + dy * dy;
+        if (d2 > R2 || d2 < 0.04) continue;
+        const d = Math.sqrt(d2), ux = dx / d, uy = dy / d;
+        const len = Math.min(1.6, 0.5 + d * 0.15), wdt = 0.13 * (it.scale > 0 ? it.scale : 1);
+        // tapered wedge trailing away from the car
+        ctx.moveTo(it.x - uy * wdt, it.y + ux * wdt);
+        ctx.lineTo(it.x - ux * len, it.y - uy * len);
+        ctx.lineTo(it.x + uy * wdt, it.y - ux * wdt);
+        ctx.closePath();
+        any = true;
+      }
+      if (any) { ctx.globalAlpha = 0.55 * k; ctx.fill(); }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';
     }
@@ -1452,6 +1857,7 @@
         ctx.globalAlpha = 1;
         return;
       }
+      if (this.quality === 'low') { this._drawDarknessDirect(ctx, run, cam, C, darkness); return; }
       const scale = this.quality === 'high' ? 0.35 : 0.25; // low-res light map (soft by nature)
       const dw = Math.max(1, Math.ceil(this.w * scale)), dh = Math.max(1, Math.ceil(this.h * scale));
       const key = dw + 'x' + dh;
@@ -1534,6 +1940,67 @@
         ctx.globalCompositeOperation = 'source-over';
         this.screenTransform();
       }
+    }
+
+    // LOW: no offscreen light map / upscale blit. One elliptical radial-gradient box around the car
+    // (stretched toward where it faces, standing in for the headlight throw) and four solid fills for the
+    // rest of the screen; the visible beam is drawn additively on top. Lava pools don't punch through.
+    _drawDarknessDirect(ctx, run, cam, C, darkness) {
+      const w = this.w, h = this.h, body = run.body;
+      ctx.globalAlpha = darkness;
+      ctx.fillStyle = C.dark;
+      if (!body || !isNum(body.x) || !isNum(body.y)) { ctx.fillRect(0, 0, w, h); ctx.globalAlpha = 1; return; }
+      const z = cam.zoom || 40;
+      const dir = Math.cos(U.safeNum(body.angle, 0)) >= 0 ? 1 : -1;
+      const p = this._toScreen(cam, body.x + 2.2 * dir, body.y + 0.6, 1);
+      const cx = p.x, cy = p.y, rx = 8.5 * z, ry = 5.8 * z;
+      const x0 = clamp(cx - rx, 0, w), x1 = clamp(cx + rx, 0, w), y0 = clamp(cy - ry, 0, h), y1 = clamp(cy + ry, 0, h);
+      if (y0 > 0) ctx.fillRect(0, 0, w, y0);
+      if (y1 < h) ctx.fillRect(0, y1, w, h - y1);
+      if (x0 > 0 && y1 > y0) ctx.fillRect(0, y0, x0, y1 - y0);
+      if (x1 < w && y1 > y0) ctx.fillRect(x1, y0, w - x1, y1 - y0);
+      if (x1 > x0 && y1 > y0) {
+        let g = this._litGrad;
+        if (!g || this._litKey !== C.dark || this._litCtx !== ctx) {
+          const c = U.hexToRgb(C.dark), rgb = c.r + ',' + c.g + ',' + c.b;
+          g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+          g.addColorStop(0, 'rgba(' + rgb + ',0)');
+          g.addColorStop(0.4, 'rgba(' + rgb + ',0.1)');
+          g.addColorStop(0.75, 'rgba(' + rgb + ',0.6)');
+          g.addColorStop(1, 'rgba(' + rgb + ',1)');
+          this._litGrad = g; this._litKey = C.dark; this._litCtx = ctx;
+        }
+        const k = this.dpr;
+        ctx.setTransform(k * rx, 0, 0, k * ry, k * cx, k * cy);
+        ctx.fillStyle = g;
+        ctx.fillRect((x0 - cx) / rx, (y0 - cy) / ry, (x1 - x0) / rx, (y1 - y0) / ry);
+        this.screenTransform();
+      }
+      ctx.globalAlpha = 1;
+      // visible headlight beam (additive)
+      const art = RR.VehicleArt;
+      const lp = art && art.lampPoint ? art.lampPoint(body, run.tuned || body.tuned || {}, this._lamp) : null;
+      const q = this._toScreen(cam, lp ? lp.x : body.x + 1.5 * dir, lp ? lp.y : body.y, 1);
+      const ang = -(U.safeNum(body.angle, 0)) + 0.06, L = 15 * z, k = this.dpr;
+      const ca = Math.cos(ang) * L, sa = Math.sin(ang) * L;
+      ctx.setTransform(k * ca, k * sa, -k * sa, k * ca, k * q.x, k * q.y);
+      ctx.globalCompositeOperation = 'lighter';
+      if (!this._beamGrad || this._beamCtx !== ctx) {
+        const bg = ctx.createLinearGradient(0, 0, 1, 0);      // unit space along the beam: bright → gone
+        bg.addColorStop(0, 'rgba(255,240,192,1)');
+        bg.addColorStop(0.55, 'rgba(255,240,192,0.45)');
+        bg.addColorStop(1, 'rgba(255,240,192,0)');
+        this._beamGrad = bg; this._beamCtx = ctx;
+      }
+      ctx.globalAlpha = 0.22 * darkness;
+      ctx.fillStyle = this._beamGrad;
+      ctx.beginPath();
+      ctx.moveTo(0, -0.02); ctx.lineTo(1, -0.36); ctx.lineTo(1, 0.36); ctx.lineTo(0, 0.02);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      this.screenTransform();
     }
 
     // world → screen (CSS px × k) into this._p
@@ -1622,6 +2089,7 @@
   // ------------------------------------------------------------------ per-surface detail painters
   // (renderer, ctx, x0, x1, style, worldColors, t, zoom, band) — WORLD transform; hashed by world x.
   const STRATA_DEPTH = [1.3, 3.1, 5.8];
+  const WALL_SURF = 255;   // sample-surface marker for the virtual wall left of T.minX
   const fontCache = new Map();
   function FONT_CACHE(px) {
     let f = fontCache.get(px);

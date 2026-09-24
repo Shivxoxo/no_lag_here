@@ -7,7 +7,8 @@
  *
  * Frame (realDt, never called while paused):
  *   controls (RR.Input or the attract autopilot) → time scale (SLOW TIME ×0.55, crash slow-mo ×0.3) →
- *   fixed 1/120 s physics steps (accumulator, ≤ RR.CONST.MAX_SUBSTEPS, excess dropped) → fuel →
+ *   semi-fixed physics steps (the scaled frame dt split into n ≤ MAX_SUBSTEPS equal steps h ≤ 1/120 s;
+ *   no carried remainder, so every rendered frame shows the pose for exactly that frame) → fuel →
  *   distance & missions → tricks → collectibles → power-ups (real time) → events (time-scaled dt) →
  *   crash / hazard checks → particles & float text → camera → terrain ensure/trim → background → engine.
  *
@@ -16,12 +17,14 @@
  *    run.env.gravity holds the base value WITHOUT the section multiplier (EventSystem multiplies
  *    env.gravity × env.gravityMul itself); run.env.gravityMul is written by the EventSystem.
  *  - Fuel burns (idleBurn + burnRate·|throttle|) × fuelEfficiencyMul per simulated second; no drain while a
- *    mega orb is active (8 s) or inside a fuel zone (which refills ~6 %/s). At 0: engine off, OUT OF FUEL,
- *    state 'nofuel'; the run ends when the car has been nearly stopped for 1.5 s (hard cap 12 s). Any
- *    refuel while coasting resumes 'running'.
+ *    mega orb is active (8 s) or inside a fuel zone (which refills 4.5 %/s; never in a no-fuel daily).
+ *    At 0: engine off, OUT OF FUEL, state 'nofuel'; the run ends when the car has been nearly stopped for
+ *    1.5 s (hard cap 12 s). Any refuel while coasting resumes 'running'.
  *  - Crashes: head contact, lava, standing on the roof / tail / nose (> ~75° from the local slope, hull on
- *    the ground, < 1 m/s) for 2.5 s, or falling far below the ground. An active SHIELD absorbs the crash
- *    (rescue + 1.5 s invulnerability). Otherwise 1.6 s of slow-mo, then onEnd(summary) exactly once.
+ *    the ground) for 2.5 s below 2.5 m/s or for 1.5 s below 10 m/s, or falling far below the ground. An
+ *    active SHIELD absorbs the crash (rescue + 1.5 s invulnerability). Otherwise 1.6 s of slow-mo, then
+ *    onEnd(summary) exactly once. quit() during the slow-mo / the out-of-fuel coast ends with 'crash' /
+ *    'fuel' (crashReason kept), otherwise 'quit'.
  *  - The Run never grants rewards: the Game calls RR.Progression.applyRunResults (+ RR.Daily.recordAttempt).
  *  - Attract mode: autopilot, no Save writes / missions / HUD / sound, silently restarts on a fresh seed
  *    after a crash, running dry or getting stuck.
@@ -34,17 +37,27 @@
  *  - Extra fields: run.seed, run.worldId, run.vehicleId, run.upgrades, run.controls {throttle, lean,
  *    handbrake, boost, engineOn}, run.specialActive (Ion Thruster firing; the renderer draws the plume),
  *    run.boostActive, run.special (tuned.special | null), run.specialCooldownMax, run.megaTime,
- *    run.newRecord (bool, distance beat the previous best), run.simTime, run.endReason,
+ *    run.newRecord (bool, whole metres beat the previous best; never on daily runs), run.newDailyBest (daily:
+ *    beat today's best), run.bestLabel ('BEST' | 'BEST TODAY'), run.jumps (take-off cues played),
+ *    run.simTime, run.endReason. With 2X COINS active every coin pickup pops a gold '+N ×2' float text.
  *    run.stats {bossCleared, fuelCollected, powerups, coinsPicked, shieldSaves, maxSpeed (km/h)}.
- *  - run.bestDistance stays the PREVIOUS best for the whole run (the BEST flag must not move).
- *  - Summary also carries {longestAir, tokens (= tokensEarned), seed, dailyId, targetDistance,
- *    previousBest, newRecord, maxSpeed, shieldSaves}; missionsCompleted = texts of missions completed
+ *  - run.bestDistance stays the PREVIOUS best for the whole run (the BEST flag must not move). Daily runs use
+ *    TODAY's best for that challenge (Daily.status().best; 0 for a stale challenge) and announce
+ *    'BEST TODAY!' with the 'mission' sting instead of 'NEW RECORD!' + fanfare.
+ *  - Summary also carries {longestAir, tokens (= tokensEarned), seed, dailyId, dailyDay (the challenge's
+ *    'YYYY-MM-DD' — pass it to Daily.recordAttempt), targetDistance, previousBest, newRecord (false on
+ *    daily runs), newDailyBest, maxSpeed, shieldSaves}; missionsCompleted = texts of missions completed
  *    during this run (from RR.Missions.track results and the 'missionComplete' Bus event).
  *  - HUD banner kinds used: 'warning' (OUT OF FUEL — the HUD turns it into its stamp), 'record';
  *    toast kinds 'powerup', 'fuel', 'shield'; flash kinds 'crash', 'shield'. Mission-complete toasts and
  *    the low-fuel cue are the HUD's own (it listens to RR.Bus / reads run.fuel).
  *  - Space: vehicles with tuned.special fire it on RR.Input 'special' events or on a rising edge of
  *    controls.handbrake (their handbrake is disabled); others use the handbrake.
+ *  - Take-off cue: 'jump' SFX + dust puff when the car leaves the ground after ≥ 0.2 s on it (see _takeoff);
+ *    skipped right after an EventSystem pad / ramp 'jump'.
+ *  - Camera: passes target.slopeAhead (ground rise/run 12 m ahead) and sets camera.bottomInset to 0 when
+ *    the touch controls are hidden (RR.Input.touchVisible === false) or in attract mode, else null (default).
+ *  - Terrain is trimmed 500 m behind the car (TRIM_BEHIND).
  */
 (function () {
   'use strict';
@@ -61,7 +74,8 @@
   const SPAWN_X = 0;
   const INITIAL_ENSURE = 220;
   const ENSURE_AHEAD = 160;
-  const TRIM_BEHIND = 250;
+  const TRIM_BEHIND = 500;            // m of terrain kept behind the car (reversing down a failed climb rarely
+                                       // reaches the virtual wall at minX; storage grows on demand)
   const CRASH_TIME = 1.6;              // s of slow-mo before the run ends
   const CRASH_SCALE = 0.3;
   const SLOWTIME_SCALE = 0.55;
@@ -69,6 +83,8 @@
   const FLIP_ANGLE = 75 * PI / 180;    // roof (> 110°) and tail/nose stands (> 75°) both count
   const FLIP_TIME = 2.5;
   const FLIP_SPEED = 2.5;              // (integration: was 1 — a car could crawl on its tail at ~1.2 m/s for 100 m)
+  const STAND_SPEED = 10;              // (physics-1 fallback) past 75° on the hull/tail below this speed …
+  const STAND_TIME = 1.5;              // … for this long also counts as flipped (sliding on the roof / tail)
   const FALL_DEPTH = 8;
   const NOFUEL_STOP_SPEED = 0.4;
   const NOFUEL_STOP_TIME = 1.5;
@@ -78,6 +94,12 @@
   const MEGA_TIME = 8;
   const CELL_REFILL = 0.35;
   const RECORD_MIN_PREV = 50;
+  const JUMP_GROUND_MIN = 0.2;         // s on the ground before a take-off counts as a jump
+  const JUMP_AIR_FAST = 0.08;          // take-off cue after this much air when rising ≥ JUMP_VY…
+  const JUMP_VY = 2;
+  const JUMP_AIR_SLOW = 0.15;          // …or after this much air regardless
+  const JUMP_COOL = 0.45;
+  const JUMP_PAD_WINDOW = 0.3;         // events already played a pad/ramp 'jump' this recently → stay quiet
   const ATTRACT_STUCK_TIME = 6;
   const SPECIAL_REQ_MS = 300;
   const PARTICLE_CAP = { low: 220, medium: 450, high: 800 };
@@ -205,6 +227,7 @@
         airDrag: safeNum(this.world.airDrag, 0.02)
       };
       this.bestDistance = this._previousBest();
+      this.bestLabel = this.daily ? 'BEST TODAY' : 'BEST';
       this.controls = { throttle: 0, lean: 0, handbrake: false, boost: 0, engineOn: true };
       this._gen = 0;
       this._apThr = 0;
@@ -218,7 +241,7 @@
       // --- scratch objects (reused every frame; no per-frame allocation)
       this._physEnv = { terrain: null, gravity: 9.81, wind: 0, frictionMul: 1, airDrag: 0.02, sensitivity: 1 };
       this._pEnv = { gravity: 9.81, wind: 0 };
-      this._camT = { x: 0, y: 0, vx: 0, vy: 0, airTime: 0, heightAboveGround: 0 };
+      this._camT = { x: 0, y: 0, vx: 0, vy: 0, airTime: 0, heightAboveGround: 0, slopeAhead: 0 };
       this._camO = { reducedMotion: false };
       this._bnd = { left: 0, right: 0, bottom: 0, top: 0 };
       this._po = { vx: 0, vy: 0, speed: 0, angle: 0, spread: 0, color: null, size: 0, life: 0, gravity: 1 };
@@ -267,7 +290,9 @@
     _previousBest() {
       if (this.attract) return 0;
       if (this.daily) {
+        // today's best for THIS challenge (a stale challenge object from before midnight has none)
         const st = RR.Daily ? call(RR.Daily, 'status') : null;
+        if (st && this.daily.day && st.day && st.day !== this.daily.day) return 0;
         return Math.max(0, safeNum(st && st.best, 0));
       }
       const d = RR.Save && RR.Save.data;
@@ -296,16 +321,20 @@
       this.crashReason = null;
       this.endReason = null;
       this.newRecord = false;
-      this._acc = 0;
+      this.newDailyBest = false;
       this._specialTime = 0;
       this._specialReqAt = 0;
       this._hbPrev = false;
       this._crashTimer = 0;
-      this._flipT = 0;
+      this._flipT = 0; this._standT = 0;
       this._noFuelT = 0;
       this._stopT = 0;
       this._stuckT = 0;
       this._recordAnnounced = false;
+      this._groundT = 0;
+      this._jumpArmed = false;
+      this._jumpCool = 0;
+      this.jumps = 0;
       this._missionDist = 0;
       this._trackedRunDist = 0;
       this._trackedAir = 0;
@@ -397,15 +426,16 @@
       pe.frictionMul = this.modifiers.frictionMul;
       pe.airDrag = this.env.airDrag;
       pe.sensitivity = this._sens;
-      this._acc += flowDt;
-      let n = 0;
-      while (this._acc >= PHYS_DT - 1e-9 && n < MAX_SUBSTEPS) {
-        b.step(PHYS_DT, this.controls, pe);
-        this._acc -= PHYS_DT;
-        n++;
-      }
-      if (this._acc > PHYS_DT) this._acc = 0;                 // spiral-of-death guard: drop the excess
-      const simDt = n * PHYS_DT;
+      // Semi-fixed timestep: the whole (time-scaled) frame is simulated in n equal steps h ≤ PHYS_DT,
+      // so the pose shown every frame is the pose at the end of that frame. The old carry-over
+      // accumulator stepped the car in 1/120 s quanta (0 or 2 steps a frame at 75/90/144/165 Hz and in
+      // slow-mo) and, without interpolation, the car juddered ~8 px against the smooth camera.
+      // At 60/120 Hz this is exactly the old 2 × / 1 × PHYS_DT. Physics rescales warm starts for h.
+      const fd = Math.min(flowDt, MAX_SUBSTEPS * PHYS_DT);
+      const n = fd > 0 ? clamp(Math.ceil(fd / PHYS_DT - 1e-6), 1, MAX_SUBSTEPS) : 0;
+      const h = n ? fd / n : 0;
+      for (let i = 0; i < n; i++) b.step(h, this.controls, pe);
+      const simDt = fd;
       this.simTime += simDt;
       if (this._specialTime > 0) this._specialTime = Math.max(0, this._specialTime - simDt);
 
@@ -435,6 +465,7 @@
       }
       if (this._gen !== gen || this._ended || this._destroyed) return;
       this._timers(dt);
+      this._takeoff(simDt, dt);
 
       // 11. particles & float text
       this._effects(dt);
@@ -450,7 +481,13 @@
       // velocity but moves `scale`× slower on screen, so feeding raw vx made the look-ahead and
       // feed-forward race ahead and the car slid off the left edge during the crash slow-mo.
       ct.x = b.x; ct.y = b.y; ct.vx = b.vx * scale; ct.vy = b.vy * scale; ct.airTime = b.airTime;
-      ct.heightAboveGround = b.y - safeNum(this.terrain.heightAt(b.x), b.y);
+      const gh = safeNum(this.terrain.heightAt(b.x), b.y);
+      ct.heightAboveGround = b.y - gh;
+      // portrait framing: rise/run of the ground 12 m ahead, and the real touch-control band (none when the
+      // on-screen controls are hidden, e.g. a narrow desktop window)
+      ct.slopeAhead = clamp((safeNum(this.terrain.heightAt(b.x + 12), gh) - gh) / 12, -3, 3);
+      const I = RR.Input;
+      this.camera.bottomInset = this.attract || (I && I.touchVisible === false) ? 0 : null;
       this._camO.reducedMotion = this._reduced;
       this.camera.update(dt, ct, this._camO);
 
@@ -579,7 +616,7 @@
       if (this.state === 'running') {
         if (this.megaTime > 0) {
           this.megaTime = Math.max(0, this.megaTime - simDt);
-        } else if (this.env.fuelZone) {
+        } else if (this.env.fuelZone && !this.modifiers.noFuelPickups) {
           this.fuel += FUEL_ZONE_REFILL * max * simDt;
         } else if (simDt > 0) {
           const f = this.tuned.fuel || {};
@@ -597,7 +634,7 @@
       } else if (this.state === 'nofuel') {
         this._noFuelT += dt;
         this._stopT = speed < NOFUEL_STOP_SPEED ? this._stopT + dt : 0;
-        if (this.env.fuelZone) {
+        if (this.env.fuelZone && !this.modifiers.noFuelPickups) {
           this.fuel = clamp(this.fuel + FUEL_ZONE_REFILL * max * simDt, 0, max);
           if (this.fuel > 0.02 * max) this._resumeEngine();
         }
@@ -649,16 +686,27 @@
         this._track('runDistance', whole);
         this._track('worldDistance', whole, this._worldCtx);
       }
-      if (!this.newRecord && d > this.bestDistance) {
-        this.newRecord = true;
+      // Whole metres, like Progression and the results screen (150.2 m does not beat a 150 m best).
+      // Daily runs chase TODAY's best for the challenge: 'BEST TODAY' + a softer sting, and never a
+      // permanent record (Progression never writes records for daily runs).
+      if (!this.newRecord && !this.newDailyBest && whole > this.bestDistance) {
+        const daily = !!this.daily;
+        if (daily) this.newDailyBest = true;
+        else this.newRecord = true;
         if (this.bestDistance >= RECORD_MIN_PREV && !this._recordAnnounced) {
           this._recordAnnounced = true;
-          this.announce('NEW RECORD!', 'Past your best of ' + U.formatDistance(this.bestDistance), 'record');
-          this._sfx('record');
+          const best = U.formatDistance(this.bestDistance);
+          if (daily) {
+            this.announce('BEST TODAY!', 'Past today\'s best of ' + best, 'record');
+            this._sfx('mission');
+          } else {
+            this.announce('NEW RECORD!', 'Past your best of ' + best, 'record');
+            this._sfx('record');
+          }
           const P = this.particles;
           if (P) {
             const o = this._opts(this.body.vx * 0.4, 2, 9, PI / 2, 1.6, null, 0, 0);
-            P.emit('confetti', this.body.x + 2, this.body.y + 2.5, 70, o);
+            P.emit('confetti', this.body.x + 2, this.body.y + 2.5, daily ? 30 : 70, o);
           }
         }
       }
@@ -698,16 +746,19 @@
       const head = !!b.headHit, hazard = b.hazard;
       b.headHit = false;             // sticky flags: read once per frame, then cleared
       b.hazard = null;
-      if (this.state !== 'running' && this.state !== 'nofuel') { this._flipT = 0; return; }
-      if (this.invulnTime > 0) { this._flipT = 0; return; }
+      if (this.state !== 'running' && this.state !== 'nofuel') { this._flipT = 0; this._standT = 0; return; }
+      if (this.invulnTime > 0) { this._flipT = 0; this._standT = 0; return; }
       if (head) { this.crash('head'); return; }
       if (hazard) { this.crash(hazard === 'lava' ? 'lava' : String(hazard)); return; }
       const T = this.terrain;
       const rel = U.wrapAngle(safeNum(b.angle, 0) - Math.atan(safeNum(T.slopeAt(b.x), 0)));
       const speed = Math.hypot(b.vx, b.vy);
-      if (Math.abs(rel) > FLIP_ANGLE && b.bodyContact && speed < FLIP_SPEED) this._flipT += dt;
+      const stand = Math.abs(rel) > FLIP_ANGLE && b.bodyContact;
+      if (stand && speed < FLIP_SPEED) this._flipT += dt;
       else this._flipT = Math.max(0, this._flipT - dt * 2);
-      if (this._flipT >= FLIP_TIME) { this.crash('flipped'); return; }
+      if (stand && speed < STAND_SPEED) this._standT += dt;
+      else this._standT = Math.max(0, this._standT - dt * 2);
+      if (this._flipT >= FLIP_TIME || this._standT >= STAND_TIME) { this.crash('flipped'); return; }
       const gy = safeNum(T.heightAt(b.x), b.y);
       if (b.y < gy - FALL_DEPTH) this.crash('fall');
     }
@@ -725,7 +776,7 @@
       this.state = 'crashed';
       this.crashReason = reason;
       this._crashTimer = CRASH_TIME;
-      this._flipT = 0;
+      this._flipT = 0; this._standT = 0;
       this._specialTime = 0;
       this.specialActive = false;
       this.boostActive = false;
@@ -765,7 +816,7 @@
       b.headHit = false;
       b.hazard = null;
       this.invulnTime = SHIELD_INVULN;
-      this._flipT = 0;
+      this._flipT = 0; this._standT = 0;
       this.stats.shieldSaves++;
       if (this.tricks) this.tricks.cancelAir();
       call(this.floatText, 'add', 'SAVED!', b.x, b.y + 1.8, { color: '#6ff6ff', size: 34, life: 1.4 });
@@ -806,10 +857,11 @@
       }
     }
 
+    // Quitting during the crash slow-mo / the out-of-fuel coast keeps the real end reason (and crashReason).
     quit() {
       if (this._ended || this._destroyed) return;
       this._quitting = true;
-      this._end('quit');
+      this._end(this.state === 'crashed' ? 'crash' : this.state === 'nofuel' ? 'fuel' : 'quit');
     }
 
     destroy() {
@@ -873,9 +925,11 @@
         missionsCompleted: this._missionTexts.slice(),
         seed: this.seed,
         dailyId: this.daily ? this.daily.id || null : null,
+        dailyDay: this.daily ? this.daily.day || null : null,
         targetDistance: this.daily && isNum(this.daily.targetDistance) ? this.daily.targetDistance : null,
         previousBest: this.bestDistance,
-        newRecord: this.newRecord,
+        newRecord: !this.daily && this.newRecord,
+        newDailyBest: !!this.daily && this.newDailyBest,
         maxSpeed: Math.round(fin(this.stats.maxSpeed)),
         shieldSaves: fin(this.stats.shieldSaves)
       };
@@ -886,7 +940,8 @@
       if (this._ended || this._destroyed) return;
       let v = Math.max(0, Math.round(safeNum(value, 0)));
       if (v <= 0) return;
-      if (this.powerUps.isActive('multiplier')) v *= 2;
+      const doubled = this.powerUps.isActive('multiplier');
+      if (doubled) v *= 2;
       this.coins += v;
       this.stats.coinsPicked++;
       x = safeNum(x, this.body.x); y = safeNum(y, this.body.y);
@@ -896,7 +951,10 @@
         this._po.angle = undefined; this._po.spread = undefined;
         P.emit('coin', x, y, v >= 100 ? 10 : v >= 25 ? 6 : 3, this._po);
       }
-      if (v >= 25 && this.floatText) {
+      if (doubled && this.floatText) {
+        // 2X COINS: every pickup pops a gold '+N ×2' so the power-up reads in the world, not only on the chip
+        this.floatText.add('+' + v + ' ×2', x, y + 0.6, { color: '#ffd23f', size: v >= 100 ? 26 : 20, life: 0.8 });
+      } else if (v >= 25 && this.floatText) {
         this.floatText.add('+' + v, x, y + 0.6, { color: v >= 100 ? '#ffd23f' : '#e8f0ff', size: v >= 100 ? 26 : 21, life: 0.9 });
       }
       this._sfx(v >= 25 ? 'coinBig' : 'coin');
@@ -1019,6 +1077,36 @@
     }
 
     // ================================================================ per-frame helpers
+    // Take-off cue ('jump' SFX + a dust puff) for ordinary jumps and crest hops: the body must have been
+    // on the ground ≥ 0.2 s and be airborne for 0.08 s while rising ≥ 2 m/s, or for 0.15 s. Pads and the
+    // moving ramp play their own 'jump' (EventSystem.jumpSfxAt), so those take-offs stay single.
+    _takeoff(simDt, dt) {
+      const b = this.body;
+      if (this._jumpCool > 0) this._jumpCool = Math.max(0, this._jumpCool - dt);
+      if (b.grounded || b.bodyContact) { this._groundT += simDt; return; }
+      if (this._groundT > 0) { this._jumpArmed = this._groundT >= JUMP_GROUND_MIN; this._groundT = 0; }
+      if (!this._jumpArmed) return;
+      const air = safeNum(b.airTime, 0), vy = safeNum(b.vy, 0);
+      if (!((air >= JUMP_AIR_FAST && vy >= JUMP_VY) || air >= JUMP_AIR_SLOW)) return;
+      this._jumpArmed = false;
+      if (this._jumpCool > 0 || this.attract || (this.state !== 'running' && this.state !== 'nofuel')) return;
+      this._jumpCool = JUMP_COOL;
+      const ev = this.events;
+      if (ev && isNum(ev.time) && isNum(ev.jumpSfxAt) && ev.time - ev.jumpSfxAt < JUMP_PAD_WINDOW) return;
+      this.jumps++;
+      const speed = Math.hypot(b.vx, b.vy);
+      this._sfx('jump', { volume: clamp(vy / 8, 0.35, 1), pitch: 0.95 + clamp(speed / 40, 0, 0.2) });
+      const P = this.particles, w = b.wheels && b.wheels[0];
+      if (P && w) {
+        const surf = w.surface || null;
+        const type = surf ? surf.type : 'dirt';
+        const col = (surf && surf.dust) || this.world.dustColor || '#9b7b4f';
+        const gx = w.x, gy = safeNum(this.terrain.heightAt(w.x), w.y - w.radius);
+        this._opts(b.vx * 0.15, 0.6, 2.2, PI / 2 + (b.vx >= 0 ? 0.5 : -0.5), 1.4, col, 0, 0);
+        P.emit(type === 'snow' || type === 'ice' ? 'snow' : type === 'mud' ? 'splash' : 'dust', gx, gy + 0.05, Math.max(4, Math.round(8 * this._qRate)), this._po);
+      }
+    }
+
     _timers(dt) {
       if (this.invulnTime > 0) this.invulnTime = Math.max(0, this.invulnTime - dt);
       if (this.specialCooldown > 0) this.specialCooldown = Math.max(0, this.specialCooldown - dt);

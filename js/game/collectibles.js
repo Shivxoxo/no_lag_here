@@ -26,6 +26,9 @@
  *    trench or lava basin, on a kicker ramp, a pad or a designed wall (terrain flags) or on a hazard
  *    surface; sits on the ground at +0.8 m. An energy cell (+35 %) sometimes sits between two cans; a
  *    mega orb (full + 8 s without drain) replaces a can roughly every 1.9–2.6 km (first ≈ 1.9 km).
+ *    Boss climbs also get guaranteed cans: ≈ 30 m before the start (unless a regular can already
+ *    covers the last 90 m), on the middle rest ledge (section.ledges[floor(n/2)] when published, else
+ *    the first ledge plateau past the climb's midpoint) and on the last rest ledge (section.ledges[n−1]).
  *    None at all when modifiers.noFuelPickups.
  *  - Power-ups every 300–500 m (first ≈ 300 m), weighted (shield rarest), never on top of a fuel can.
  *
@@ -72,6 +75,8 @@
   const SEARCH_AHEAD = 45;          // m searched for a safe fuel / power-up spot
   const PICKUP_GAP = 8;             // m kept between a fuel pickup and a power-up
   const WRITTEN_AHEAD = 18;         // m past a published chunk whose heights/flags are final
+  const BOSS_FUEL_BEFORE = 30;      // m before a boss climb's start: a guaranteed fuel can …
+  const BOSS_FUEL_COVER = 90;       // … unless a regular can already sits this close before the start
 
   // item kinds / states
   const COIN = 'coin', POWER = 'powerup';
@@ -89,6 +94,7 @@
     this.kind = COIN; this.type = ''; this.x = 0; this.y = 0; this.value = 0; this.tier = 0;
     this.state = IDLE; this.t = 0; this.sx = 0; this.sy = 0; this.vx = 0; this.vy = 0;
     this.falling = false; this.settled = true; this.phase = 0; this.r = PICK_R.coin; this.scale = 1;
+    this.boss = false;              // fuel: a guaranteed boss-climb can (see _bossFuel)
   }
 
   // First index ≥ from whose x ≥ x (items between `from` and the end are non-null, ~sorted by x).
@@ -161,6 +167,8 @@
       this._nextCellX = NaN;
       this._nextMegaX = FIRST_MEGA + this._rf.range(-150, 150);
       this._nextPowerX = this._rp.range(270, 340);
+      this._bossApproach = [];      // boss starts whose approach can was handled
+      this._bossLedge = [];         // 'bossStart:ledgeX' keys of ledges whose can was handled
 
       this.stats = { coins: 0, fuel: 0, cells: 0, megas: 0, powerups: 0, coinValue: 0 };
       this.collected = { coin: 0, fuel: 0, cell: 0, mega: 0, powerup: 0 };
@@ -193,6 +201,7 @@
         this._commitCoins(buf);
         buf.length = 0;
         this._fuelChunk(x0, x1, T);
+        this._bossFuel(x0, x1, T, features);
         this._powerChunk(x0, x1, T);
       } catch (e) {
         logOnce('spawnChunk', e);
@@ -228,7 +237,7 @@
       const it = this._pool.length ? this._pool.pop() : new Item();
       it.kind = kind; it.type = ''; it.x = x; it.y = y; it.value = 0; it.tier = 0;
       it.state = IDLE; it.t = 0; it.sx = x; it.sy = y; it.vx = 0; it.vy = 0;
-      it.falling = false; it.settled = true; it.scale = 1;
+      it.falling = false; it.settled = true; it.scale = 1; it.boss = false;
       it.phase = U.hash2(Math.floor(x * 8) | 0, 0x51ab) / 4294967296 * TAU;
       it.r = PICK_R[kind] || PICK_R.coin;
       return it;
@@ -567,10 +576,19 @@
         const s = this._spotAwayFrom(T, want, limit, PICKUP_GAP, this.powerups, 'powerups');
         if (s === null) break;                                    // wait for more terrain
         if (!isNum(s)) { this._nextFuelX = want + SEARCH_AHEAD; continue; }
-        let kind = 'fuel';
-        if (s >= this._nextMegaX) { kind = 'mega'; this._nextMegaX = s + r.range(1900, 2600); }
-        this._placePickup(this.fuel, 'fuel', kind, s, T.heightAt(s) + (kind === 'mega' ? 1.1 : 0.8));
-        if (kind === 'mega') this.stats.megas++; else this.stats.fuel++;
+        // a guaranteed boss can (see _bossFuel) already sits right here: it stands in for this one — and
+        // takes over its mega-orb slot, so the ≈ 2 km mega cadence survives the boss cans
+        const near = this._fuelItemNear(s - 25, s + 25);
+        if (!near) {
+          let kind = 'fuel';
+          if (s >= this._nextMegaX) { kind = 'mega'; this._nextMegaX = s + r.range(1900, 2600); }
+          this._placePickup(this.fuel, 'fuel', kind, s, T.heightAt(s) + (kind === 'mega' ? 1.1 : 0.8));
+          if (kind === 'mega') this.stats.megas++; else this.stats.fuel++;
+        } else if (s >= this._nextMegaX && near.kind === 'fuel' && near.state === IDLE) {
+          near.kind = 'mega'; near.r = PICK_R.mega; near.y = T.heightAt(near.x) + 1.1; near.sy = near.y;
+          this.stats.fuel--; this.stats.megas++;
+          this._nextMegaX = s + r.range(1900, 2600);
+        }
         const d = clamp(U.safeNum(T.difficultyAt ? T.difficultyAt(s) : 0, 0), 0, 1);
         // Gaps widen steadily with distance (not with the world's difficulty ramp, which takes 5–7 km):
         // ~230 m at the start, ~730 m at 1 km, ~980 m at 1.5 km, capped at 1.15 km. With a stock tank
@@ -590,6 +608,98 @@
         }
         this._nextCellX = NaN;
       }
+    }
+
+    // Boss climbs: failing THE MOUNTAIN GIANT should be a driving failure, not running dry on invisible
+    // fuel arithmetic (regular cans are ~1 km apart there). Guaranteed full cans: one ≈ 30 m before the
+    // climb (unless a regular can already covers the approach) and one on the middle rest ledge —
+    // section.ledges[floor(n/2)] when the terrain publishes it, else the first ledge plateau feature past
+    // the climb's midpoint. Deterministic (no rng), skipped when modifiers.noFuelPickups.
+    _bossFuel(x0, x1, T, features) {
+      if (this._noFuel) return;
+      const limit = x1 + WRITTEN_AHEAD;
+      if (typeof T.upcomingSection === 'function') {
+        let sec = T.upcomingSection(x0 - BOSS_FUEL_BEFORE - 1);
+        for (let g = 0; sec && g < 4 && sec.start - BOSS_FUEL_BEFORE < x1; g++) {
+          const B = sec.start;
+          if (sec.id === 'boss' && this._bossApproach.indexOf(B) < 0 && B - BOSS_FUEL_BEFORE >= x0) {
+            this._bossApproach.push(B);
+            if (!isNum(this._fuelNear(B - BOSS_FUEL_COVER, B + 5))) {
+              const sp = this._spotIn(T, B - BOSS_FUEL_BEFORE - 6, Math.min(B - 12, limit));
+              if (isNum(sp)) this._bossCan(T, sp);
+            }
+          }
+          sec = T.upcomingSection(B);
+        }
+      }
+      // middle ledge + last ledge: the climb from the middle ledge over the headwall and the final wall is
+      // longer than a tank lasts at full throttle (≈ 20 s), so the last rest ledge gets a can too
+      if (typeof T.sectionAt !== 'function') return;
+      const sec = T.sectionAt(Math.min(x1 - 0.5, limit));
+      const bs = sec && sec.id === 'boss' ? sec : T.sectionAt(x0);
+      if (!bs || bs.id !== 'boss') return;
+      const targets = [];
+      if (Array.isArray(bs.ledges) && bs.ledges.length) {
+        const n = bs.ledges.length, m = Math.floor(n / 2);
+        targets.push(bs.ledges[m]);
+        if (n - 1 > m) targets.push(bs.ledges[n - 1]);
+      } else if (Array.isArray(features)) {
+        const mid = (bs.start + U.safeNum(bs.summitX, bs.end)) / 2;
+        for (let i = 0; i < features.length; i++) {
+          const f = features[i];
+          if (f && f.type === 'plateau' && f.meta && f.meta.ledge && isNum(f.x) && isNum(f.x2) &&
+            f.x >= bs.start && (f.x + f.x2) / 2 >= mid) { targets.push(f); break; }
+        }
+      }
+      for (let k = 0; k < targets.length; k++) {
+        const L = targets[k];
+        if (!L || !isNum(L.x) || !isNum(L.x2) || L.x < x0 || L.x >= x1) continue;
+        const key = bs.start + ':' + L.x;
+        if (this._bossLedge.indexOf(key) >= 0) continue;
+        this._bossLedge.push(key);
+        const len = L.x2 - L.x;
+        const sp = this._spotIn(T, L.x + (len < 12 ? 1.5 : 2.5), Math.min(L.x2 - 1, limit));
+        if (isNum(sp) && !isNum(this._fuelNear(sp - 25, sp + 25))) this._bossCan(T, sp);   // unless a can is already there
+      }
+    }
+
+    // Place a guaranteed can at x — or, when an energy cell sits within 20 m, upgrade that cell in place.
+    _bossCan(T, x) {
+      const list = this.fuel;
+      for (let i = lowerBound(list, this._heads.fuel, x - 20); i < list.length && list[i].x <= x + 20; i++) {
+        const it = list[i];
+        if (it && it.kind === 'cell' && it.state === IDLE) {
+          it.kind = 'fuel'; it.r = PICK_R.fuel; it.boss = true;
+          this.stats.cells--; this.stats.fuel++;
+          return it;
+        }
+      }
+      const it = this._placePickup(list, 'fuel', 'fuel', x, T.heightAt(x) + 0.8);
+      it.boss = true;
+      this.stats.fuel++;
+      return it;
+    }
+
+    // x of a fuel can / mega orb (not a cell) in [a, b], or NaN.
+    _fuelNear(a, b) {
+      const it = this._fuelItemNear(a, b);
+      return it ? it.x : NaN;
+    }
+    _fuelItemNear(a, b) {
+      const list = this.fuel;
+      for (let i = lowerBound(list, this._heads.fuel, a); i < list.length && list[i].x <= b; i++) {
+        const it = list[i];
+        if (it && (it.kind === 'fuel' || it.kind === 'mega')) return it;
+      }
+      return null;
+    }
+
+    // First safe spot in [a, b] (1 m steps) that keeps PICKUP_GAP from power-ups, or NaN.
+    _spotIn(T, a, b) {
+      for (let s = a; s <= b; s += 1) {
+        if (this._spotOk(T, s) && !isNum(this._conflict(this.powerups, 'powerups', s, PICKUP_GAP))) return s;
+      }
+      return NaN;
     }
 
     _powerChunk(x0, x1, T) {

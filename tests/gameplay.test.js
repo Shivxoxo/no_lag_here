@@ -394,10 +394,16 @@ H.test('fuel: never in trenches / lava / ramps, on the ground, first ≈ 150 m, 
       const lift = it.kind === 'mega' ? 1.1 : 0.8;
       H.assertClose(it.y, T.heightAt(it.x) + lift, 1e-6, wid + ' fuel height');
     }
-    for (let i = 1; i < cans.length; i++) {
+    // guaranteed boss-climb cans (gameplay / terrain-1) are extras; a regular can that falls within 25 m of
+    // one is dropped (the boss can stands in for it), so gaps next to them are not checked
+    const bossCans = cans.filter((c) => c.boss);
+    const regular = cans.filter((c) => !c.boss);
+    const nearBoss = (a, b) => bossCans.some((c) => c.x >= a - 26 && c.x <= b + 26);
+    for (let i = 1; i < regular.length; i++) {
+      if (nearBoss(regular[i - 1].x, regular[i].x)) continue;
       // integration balance pass: min(1150, 230 + 0.5·x) × world.fuelSpacing, ±15 %
-      const base = Math.min(1150, 230 + 0.5 * cans[i - 1].x) * world.fuelSpacing;
-      const gap = cans[i].x - cans[i - 1].x;
+      const base = Math.min(1150, 230 + 0.5 * regular[i - 1].x) * world.fuelSpacing;
+      const gap = regular[i].x - regular[i - 1].x;
       H.assert(gap >= base * 0.85 - 1e-6 && gap <= base * 1.15 + 75, wid + ' fuel gap ' + gap.toFixed(1) + ' vs ' + base.toFixed(1));
     }
     for (const cell of C.fuel.filter((it) => it.kind === 'cell')) {
@@ -845,9 +851,13 @@ H.test('callbacks: coins (×2 multiplier), fuel, power-ups, tricks, bonus; missi
   run.powerUps.clear();          // the driver may have collected a 2X COINS power-up
   const c0 = run.coins;
   run.onCoin(25, run.body.x, run.body.y);
+  const texts = () => run.floatText ? run.floatText._items.slice(0, run.floatText.count).map((it) => it.text + '|' + it.color) : [];
+  const t0 = texts().length;
   run.onPowerup('multiplier');
   run.onCoin(5, run.body.x, run.body.y);
   H.assert(run.coins - c0 === 35, 'multiplier doubles: ' + (run.coins - c0));
+  // visuals-2 (verifier): with 2X COINS every pickup pops a gold '+N ×2' float text
+  if (run.floatText) H.assert(texts().slice(t0).indexOf('+10 ×2|#ffd23f') >= 0, 'gold ×2 float text: ' + JSON.stringify(texts().slice(t0)));
   H.assert(missionLog.filter((m) => m.stat === 'coins').map((m) => m.value).join() === '25,10', 'coins tracked with value');
   H.assert(audioLog.indexOf('coinBig') >= 0 && audioLog.indexOf('coin') >= 0 && audioLog.indexOf('powerup') >= 0, 'sounds');
   run.onFuel('fuel');
@@ -973,6 +983,249 @@ H.test('real renderer + NaN-checking canvas: full frames draw collectibles, vehi
   }
   H.assert(calls > 5000, 'canvas calls ' + calls);
   H.assert(bad === 0, bad + ' non-finite / negative-radius canvas arguments');
+});
+
+// ================================================================== fix wave (gameplay cluster)
+// gameplay-1: semi-fixed timestep — every frame simulates exactly its (time-scaled) dt in equal steps ≤ 1/120 s.
+H.test('semi-fixed timestep: no carried remainder, h ≤ PHYS_DT, 60/120 Hz unchanged, smooth car at 75–165 Hz', () => {
+  const PHYS = RR.CONST.PHYS_DT;
+  const proto = RR.VehicleBody.prototype, orig = proto.step;
+  let hs = [];
+  proto.step = function (h, c, e) { hs.push(h); return orig.call(this, h, c, e); };
+  try {
+    for (const [hz, n] of [[60, 2], [120, 1], [75, 2], [90, 2], [144, 1], [165, 1]]) {
+      const run = newRun({ seed: 99 });
+      for (let f = 0; f < hz; f++) {
+        hs = [];
+        const sim0 = run.simTime;
+        drive(run); run.fuel = run.fuelMax; run.update(1 / hz);
+        H.assert(hs.length === n, hz + ' Hz: ' + hs.length + ' steps (want ' + n + ')');
+        for (const h of hs) H.assert(h <= PHYS + 1e-12 && Math.abs(h - 1 / hz / n) < 1e-12, hz + ' Hz: step ' + h);
+        H.assertClose(run.simTime - sim0, 1 / hz, 1e-12, hz + ' Hz: simTime advances by dt');
+      }
+      run.destroy();
+    }
+    // crash slow-mo at 60 Hz: one 0.005 s step every frame (the old accumulator alternated 0 / 1 steps)
+    const run = newRun({ seed: 99 });
+    frames(run, 2, drive);
+    run.crash('head');
+    for (let f = 0; f < 30; f++) { hs = []; run.update(DT); H.assert(hs.length === 1 && Math.abs(hs[0] - DT * 0.3) < 1e-12, 'slow-mo step ' + hs); }
+    run.destroy();
+  } finally {
+    proto.step = orig;
+  }
+  // car screen x has no step judder at 144 Hz (p95 second difference < 1 px; was ~8 px)
+  const run = newRun({ seed: 99 });
+  const sx = [];
+  for (let f = 0; f < 144 * 6; f++) {
+    drive(run); run.fuel = run.fuelMax; run.update(1 / 144);
+    if (f > 144 * 3) sx.push((run.body.x - run.camera.cx) * run.camera.zoom);
+  }
+  const d2 = [];
+  for (let i = 2; i < sx.length; i++) d2.push(Math.abs(sx[i] - 2 * sx[i - 1] + sx[i - 2]));
+  d2.sort((a, b) => a - b);
+  const p95 = d2[Math.floor(d2.length * 0.95)];
+  H.assert(p95 < 1, '144 Hz car screen-x p95 2nd difference ' + p95.toFixed(2) + ' px');
+  run.destroy();
+});
+
+// gameplay-2: take-off cue for ordinary jumps / crest hops.
+H.test('take-off cue: jump SFX + dust on ≥ 80% of real take-offs, ≤ 1 per 0.45 s, none from pads twice', () => {
+  clearLogs();
+  const plays = [];
+  const play = RR.Audio.play;
+  let run = null;
+  RR.Audio.play = (n, o) => { if (n === 'jump' && run) plays.push({ t: run.simTime, o }); return play(n, o); };
+  try {
+    run = newRun({ seed: 11 });
+    let air = false, groundT = 0, armed = false, p0 = 0, big = 0, covered = 0, lastAir = 0;
+    for (let f = 0; f < 60 * 60 && !run.__ends.length; f++) {
+      run._autopilot(); controls.throttle = run._apThr; controls.lean = run._apLean;
+      run.fuel = run.fuelMax; run.invulnTime = 1;
+      run.update(DT);
+      const b = run.body, touch = b.grounded || b.bodyContact;
+      if (touch) {
+        if (air && armed && lastAir > 0.3) { big++; if (plays.length > p0) covered++; }
+        air = false; groundT += DT;
+      } else {
+        if (!air) { armed = groundT >= 0.2; groundT = 0; p0 = plays.length; }
+        air = true; lastAir = b.airTime;
+      }
+    }
+    H.assert(big >= 10, 'enough take-offs (' + big + ')');
+    H.assert(covered >= 0.8 * big, 'jump cue on ' + covered + '/' + big + ' take-offs with > 0.3 s air');
+    for (let i = 1; i < plays.length; i++) H.assert(plays[i].t - plays[i - 1].t >= 0.45 - 1e-9, 'cue spacing ' + (plays[i].t - plays[i - 1].t).toFixed(3));
+    for (const p of plays) H.assert(p.o && p.o.volume >= 0.35 && p.o.volume <= 1 && p.o.pitch >= 0.95 && p.o.pitch <= 1.15 + 1e-9, 'volume / pitch ' + JSON.stringify(p.o));
+    H.assert(run.jumps === plays.length, 'run.jumps counts the cues');
+    run.destroy();
+    // a take-off right after a pad / ramp 'jump' (EventSystem.jumpSfxAt) stays single
+    plays.length = 0;
+    run = newRun({ seed: 11 });
+    frames(run, 3, drive);
+    run.body.setVelocity(run.body.vx, 7);
+    run.body.setPose(run.body.x, run.body.y + 0.6, run.body.angle);
+    run.events.jumpSfxAt = run.events.time;
+    frames(run, 0.4, drive);
+    H.assert(plays.length === 0, 'no second jump cue after a pad launch');
+    run.destroy();
+    // attract mode never plays it
+    run = newRun({ mode: 'attract', seed: 11 });
+    frames(run, 20);
+    H.assert(plays.length === 0, 'attract mode is silent');
+    run.destroy();
+  } finally {
+    RR.Audio.play = play;
+  }
+});
+
+// gameplay-5: fuel zones never refill in the no-fuel daily (even if env.fuelZone were set).
+H.test('no-fuel daily: fuel zone flag never refills (running or coasting)', () => {
+  const ch = { id: 'no_fuel', day: '2026-09-24', worldId: 'green_valley', seed: 5,
+    modifiers: { noFuelPickups: true, fuelEfficiencyMul: 0.35 }, targetDistance: 850 };
+  const run = newRun({ mode: 'daily', daily: ch });
+  frames(run, 1, drive);
+  run.fuel = 50;
+  run.env.fuelZone = true;
+  run._updateFuel(DT, DT);
+  H.assert(run.fuel < 50, 'no refill while running (' + run.fuel + ')');
+  run.fuel = 0; run._outOfFuel();
+  run.env.fuelZone = true;
+  run._updateFuel(DT, DT);
+  H.assert(run.fuel === 0 && run.state === 'nofuel', 'no refill while coasting');
+  H.assert(run.events.forceEvent('fuel_zone') === false, 'EventSystem refuses the zone');
+  run.destroy();
+});
+
+// gameplay-7: quitting during the crash slow-mo / out-of-fuel coast keeps the real reason.
+H.test('quit: keeps the crash / fuel end reason; a live quit is "quit"', () => {
+  let run = newRun();
+  frames(run, 1, drive);
+  run.crash('head');
+  run.quit();
+  H.assert(run.__ends.length === 1 && run.__ends[0].endReason === 'crash' && run.__ends[0].crashReason === 'head', 'crash kept: ' + JSON.stringify(run.__ends[0] && run.__ends[0].endReason));
+  run.destroy();
+  run = newRun();
+  frames(run, 1, drive);
+  run.fuel = 0;
+  frames(run, DT, drive);
+  H.assert(run.state === 'nofuel', 'coasting');
+  H.assert(run.getSummary().endReason === 'fuel', 'live summary says fuel');
+  run.quit();
+  H.assert(run.__ends[0].endReason === 'fuel', 'fuel kept');
+  run.destroy();
+  run = newRun();
+  frames(run, 1, drive);
+  run.quit();
+  H.assert(run.__ends[0].endReason === 'quit', 'plain quit');
+  run.destroy();
+});
+
+// gameplay-8 / progression-1/2: the in-run banner agrees with Progression and the results screen.
+H.test('records: whole metres; daily runs chase BEST TODAY (no permanent record); summary.dailyDay', () => {
+  // fractional metres do not beat a whole-metre best
+  clearLogs();
+  let run = newRun();
+  run.bestDistance = 150;
+  frames(run, 1, drive);
+  run.body.setPose(run.startX + 150.6, run.body.y, run.body.angle);
+  run._updateDistance();
+  H.assert(!run.newRecord && !hudLog.some((h) => h[1] === 'NEW RECORD!'), '150.6 m does not beat 150 m');
+  run.body.setPose(run.startX + 151.02, run.body.y, run.body.angle);
+  run._updateDistance();
+  H.assert(run.newRecord && hudLog.filter((h) => h[1] === 'NEW RECORD!').length === 1, '151 m does');
+  const s0 = run.getSummary();
+  H.assert(s0.newRecord === true && s0.newDailyBest === false && s0.dailyDay === null, 'normal summary fields');
+  H.assert(RR.Progression.computeRunRewards(Object.assign({}, s0, { distance: 151.02 })).newRecord ===
+    (Math.floor(151.02) > Math.max(0, (RR.Save.data.bestDistances || {}).green_valley || 0)), 'progression agrees on whole metres');
+  run.destroy();
+  // daily: today's best is the reference, 'BEST TODAY!' + the mission sting, never summary.newRecord
+  clearLogs();
+  const ch = RR.Daily.getChallenge();
+  const saveDaily = RR.Save.data.daily;
+  const saveBest = Object.assign({}, RR.Save.data.bestDistances);
+  RR.Save.data.bestDistances[ch.worldId] = 2000;
+  RR.Save.data.daily = { day: ch.day, best: 120, attempts: 1, completed: false };
+  try {
+    run = newRun({ mode: 'daily', daily: ch });
+    H.assert(run.bestDistance === 120 && run.bestLabel === 'BEST TODAY', 'daily reference = today\'s best (' + run.bestDistance + ')');
+    for (let f = 0; f < 60 * 30 && run.distance < 200 && !run.__ends.length; f++) { drive(run); run.invulnTime = 1; run.fuel = run.fuelMax; run.update(DT); }
+    H.assert(run.distance > 121, 'passed today\'s best');
+    const banners = hudLog.filter((h) => h[0] === 'banner').map((h) => h[1]);
+    H.assert(banners.indexOf('BEST TODAY!') >= 0 && banners.indexOf('NEW RECORD!') < 0, 'banners ' + JSON.stringify(banners));
+    H.assert(audioLog.indexOf('mission') >= 0 && audioLog.indexOf('record') < 0, 'soft sting, no record fanfare');
+    run.quit();
+    const s = run.__ends[0];
+    H.assert(s.newRecord === false && s.newDailyBest === true && s.dailyDay === ch.day && s.dailyId === ch.id, 'daily summary ' + JSON.stringify({ r: s.newRecord, d: s.newDailyBest, day: s.dailyDay }));
+    const rw = RR.Progression.computeRunRewards(s);
+    H.assert(!rw.newRecord && !rw.newWorldRecord, 'results show no world record either');
+    run.destroy();
+    // a stale challenge object (from before midnight) has no 'today' best to chase
+    run = newRun({ mode: 'daily', daily: Object.assign({}, ch, { day: '1999-01-01' }) });
+    H.assert(run.bestDistance === 0, 'stale challenge → no reference');
+    run.destroy();
+  } finally {
+    RR.Save.data.daily = saveDaily;
+    RR.Save.data.bestDistances = saveBest;
+  }
+});
+
+// physics-1 fallback: sliding / standing on the hull past 75° below 10 m/s ends the run after 1.5 s.
+H.test('tail / roof slide past 75° below 10 m/s counts as flipped after 1.5 s', () => {
+  const run = newRun();
+  frames(run, 1, drive);
+  const T = run.terrain;
+  let t = 0;
+  // hold the body in a synthetic 80° nose-up, hull-contact, 6 m/s state (the physics limiter normally
+  // prevents it; this is the safety net)
+  const hold = () => {
+    const b = run.body;
+    b.bodyContact = true;
+    b.angle = Math.atan(T.slopeAt(b.x)) + 1.4;
+    b.vx = 6; b.vy = 0;
+  };
+  const step = RR.VehicleBody.prototype.step;
+  run.body.step = function (h) { this.x += 6 * h; this.time = (this.time || 0) + h; };
+  while (run.state === 'running' && t < 3) { hold(); run.update(DT); t += DT; }
+  run.body.step = step;
+  H.assert(run.state === 'crashed' && run.crashReason === 'flipped', 'flipped (' + run.state + ')');
+  H.assert(t >= 1.45 && t <= 1.7, 'after ~1.5 s (' + t.toFixed(2) + ')');
+  run.destroy();
+});
+
+// visuals-1 cross: 500 m of terrain kept behind the car.
+H.test('terrain window keeps ~500 m behind the car', () => {
+  const run = newRun({ seed: 5 });
+  run.body.step = function (h) { this.x += 40 * h; this.y = run.terrain.heightAt(this.x) + 0.9; this.vx = 40; this.vy = 0; };
+  for (let f = 0; f < 60 * 22; f++) { run.fuel = run.fuelMax; run.invulnTime = 1; run.update(DT); }
+  const behind = run.body.x - run.terrain.minX;
+  H.assert(run.body.x > 800 && behind >= 499 && behind <= 510, 'kept ' + behind.toFixed(1) + ' m behind at x=' + run.body.x.toFixed(0));
+  run.destroy();
+});
+
+// terrain-1 cross: THE MOUNTAIN GIANT is a driving test, not a fuel check.
+H.test('boss climbs: guaranteed full cans ≈ 30 m before the start and on the middle ledge', () => {
+  for (const [wid, seed] of [['green_valley', 1], ['rocky_highlands', 2], ['snow_peaks', 3], ['storm_planet', 7]]) {
+    const run = placementRun(wid, seed);
+    grow(run, 3800);
+    const T = run.terrain, C = run.collectibles;
+    const sec = T.sections.find((s) => s.id === 'boss');
+    H.assert(sec, wid + ' boss section');
+    const B = sec.start;
+    const approach = C.fuel.filter((f) => f.kind !== 'cell' && f.x >= B - 90 && f.x < B);
+    H.assert(approach.length >= 1, wid + ' a can covers the last 90 m before the climb');
+    H.assert(approach.some((f) => f.x >= B - 45 && f.x <= B - 12) || approach.some((f) => !f.boss), wid + ' approach can ≈ 30 m before');
+    const ledges = Array.isArray(sec.ledges) && sec.ledges.length ? sec.ledges
+      : T.features.filter((f) => f.type === 'plateau' && f.meta && f.meta.ledge && f.x >= B && f.x < sec.end);
+    H.assert(ledges.length >= 2, wid + ' ledges');
+    const mid = (B + sec.summitX) / 2;
+    const climbCans = C.fuel.filter((f) => f.kind !== 'cell' && f.x > B && f.x < sec.summitX);
+    H.assert(climbCans.length >= 1, wid + ' a can on the climb');
+    H.assert(climbCans.some((f) => Math.abs(f.x - mid) < (sec.summitX - B) * 0.4), wid + ' can near the middle of the climb');
+  }
+  // none in the no-fuel daily
+  const nf = placementRun('green_valley', 1, RR.Run.normalizeModifiers({ noFuelPickups: true }));
+  grow(nf, 3800);
+  H.assert(nf.collectibles.fuel.length === 0, 'no fuel at all under noFuelPickups');
 });
 
 H.test('performance: Run.update cost (node vm harness, informational bound)', () => {

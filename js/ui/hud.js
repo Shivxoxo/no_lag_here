@@ -22,7 +22,8 @@
  *    Toasts live in #toasts and are visible in menus too (RR.UI uses them).
  *  - HUD raises the 'NEW RECORD!' banner itself (once per run, when distance passes a previous best
  *    ≥ 50 m) and plays RR.Audio 'record'; plays 'warning' once when fuel drops below 20 %.
- *  - The FPS counter follows RR.Save.data.settings.showFps (read each frame, no extra API).
+ *  - The FPS counter follows RR.Save.data.settings.showFps (read each frame, no extra API); it also shows
+ *    the renderer's dynamic render scale when below 100% (and the rendered quality in 'auto' mode).
  *  - visible (getter).
  */
 (function () {
@@ -543,7 +544,12 @@
     if (fpsTime >= 0.5) {
       const fps = Math.round((fpsFrames & 0xffff) / fpsTime);
       fpsFrames = 0; fpsTime = 0;
-      setText('fps', E.fps, fps + ' FPS');
+      // dynamic resolution readout: render scale (and the stepped-down quality in 'auto')
+      let extra = '';
+      const r = RR.Game && RR.Game.renderer;
+      if (r && typeof r.renderScale === 'number' && r.renderScale < 0.999) extra += ' · ' + Math.round(r.renderScale * 100) + '%';
+      if (r && r.qualitySetting === 'auto' && r.quality) extra += ' · ' + String(r.quality).toUpperCase();
+      setText('fps', E.fps, fps + ' FPS' + extra);
     }
   }
 

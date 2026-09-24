@@ -218,13 +218,13 @@ for (const world of RR.Worlds.list) {
         const s = secEnv[sid] || (secEnv[sid] = { rain: 0, dark: 0, wind: 0, grav: 1, tint: null, n: 0 });
         s.n++;
         s.rain = Math.max(s.rain, env.rain); s.dark = Math.max(s.dark, env.darkness);
-        s.wind = Math.max(s.wind, Math.abs(env.wind - base.wind)); s.grav = Math.min(s.grav, env.gravityMul);
+        s.wind = Math.max(s.wind, Math.abs(env.wind - ev.ambientWind())); s.grav = Math.min(s.grav, env.gravityMul);
         if (env.tint === 'rgba(255,80,20,0.12)') s.tint = env.tint;
       }
       const gust = ev.active.some((r) => r.id === 'wind_gust');
       quietFor = !sid && !gust && !env.fuelZone ? quietFor + DT : 0;
       if (quietFor > 3) {
-        H.assertClose(env.wind, base.wind, 1e-9, 'wind back to base');
+        H.assertClose(env.wind, ev.ambientWind(), 1e-9, 'wind back to the ambient/base wind');
         H.assertClose(env.gravityMul, 1, 1e-9, 'gravityMul back to 1');
         H.assertClose(env.darkness, base.darkness, 1e-9, 'darkness back to base');
         H.assert(env.rain === 0 && env.tint === null, 'rain/tint cleared');
@@ -539,22 +539,66 @@ H.test('wind gust: env untouched during 1.5–2 s telegraph, smooth gust on top 
   H.assert(rec.tele >= 1.5 && rec.tele <= 2 && rec.dur >= 3 && rec.dur <= 5, 'timings');
   const gust = RR.Worlds.byId('storm_planet').wind.gust;
   H.assert(rec.mag >= gust * 0.8 - 1e-9 && rec.mag <= gust * 1.4 + 1e-9, 'magnitude');
-  let prev = run.env.wind, maxStep = 0, peak = 0;
+  // Storm Planet also has the ambient gust field: the event rides on top of ev.ambientWind()
+  const gustPart = () => run.env.wind - ev.ambientWind();
+  let prev = gustPart(), maxStep = 0, peak = 0, ambStep = 0, prevAmb = ev.ambientWind();
   const t0 = run.time;
   while (ev.active.length) {
     stepRun(run, DT, 0);
-    if (run.time - t0 < rec.tele - 1e-6) H.assertClose(run.env.wind, base, 1e-9, 'wind during telegraph');
-    maxStep = Math.max(maxStep, Math.abs(run.env.wind - prev));
-    peak = Math.max(peak, Math.abs(run.env.wind - base));
-    prev = run.env.wind;
+    if (run.time - t0 < rec.tele - 1e-6) H.assertClose(gustPart(), 0, 1e-9, 'wind during telegraph');
+    maxStep = Math.max(maxStep, Math.abs(gustPart() - prev));
+    peak = Math.max(peak, Math.abs(gustPart()));
+    prev = gustPart();
+    ambStep = Math.max(ambStep, Math.abs(ev.ambientWind() - prevAmb));
+    prevAmb = ev.ambientWind();
   }
   H.assert(peak > rec.mag * 0.95, 'gust reached full strength');
   H.assert(maxStep < rec.mag * 0.06, 'smooth ramps (max step ' + maxStep.toFixed(3) + ')');
-  H.assertClose(run.env.wind, base, 1e-9, 'back to base');
-  // daily windMul scales base wind
-  const run2 = forcedRun('storm_planet', { modifiers: { windMul: 2 } });
+  H.assert(ambStep < 0.1, 'ambient wind is smooth too (max step ' + ambStep.toFixed(3) + ' m/s² per frame)');
+  H.assertClose(gustPart(), 0, 1e-9, 'back to the ambient wind');
+  // daily windMul scales the steady base wind of a world without an ambient field (windMul ≤ 1)
+  const run2 = forcedRun('desert_canyon', { modifiers: { windMul: 0.5 } });
   stepRun(run2, DT, 0);
-  H.assertClose(run2.env.wind, base * 2, 1e-9, 'windMul applied to base');
+  H.assert(run2.events.ambAmp === 0, 'no ambient field');
+  H.assertClose(run2.env.wind, RR.Worlds.byId('desert_canyon').wind.base * 0.5, 1e-9, 'windMul applied to base');
+});
+
+// gameplay-3: Storm Planet / Gale Force / Chaos really are windy; ordinary worlds keep their steady wind.
+H.test('ambient wind: Storm Planet strong & gusty, Gale Force / Chaos felt, normal worlds unchanged', () => {
+  const sample = (worldId, mods, seed) => {
+    const run = forcedRun(worldId, mods ? { modifiers: mods, seed } : { seed });
+    const ev = run.events, W = [];
+    for (let t = 0; t < 600; t += 0.05) W.push(ev.ambientWind(t));
+    return { ev, W };
+  };
+  const frac = (W, k) => W.filter((w) => Math.abs(w) > k).length / W.length;
+  const mean = (W) => W.reduce((a, b) => a + b, 0) / W.length;
+  let big = 0, m = 0, n = 0;
+  for (const seed of [1, 2, 3, 4, 5, 6]) {
+    const { ev, W } = sample('storm_planet', null, seed);
+    H.assertClose(ev.ambAmp, 6, 1e-9, 'storm planet amplitude');
+    big += frac(W, 4); m += mean(W); n++;
+    // swings between head- and tailwind within ~10-15 s
+    let flips = 0;
+    for (let i = 1; i < W.length; i++) if (Math.sign(W[i]) !== Math.sign(W[i - 1])) flips++;
+    H.assert(flips >= 40, 'storm wind flips direction (' + flips + ' sign changes in 600 s)');
+  }
+  H.assert(big / n >= 0.25, 'storm planet |wind| > 4 on ' + (100 * big / n).toFixed(1) + '% of the time');
+  H.assert(m / n >= -1 && m / n <= 0.3, 'storm planet mean wind ' + (m / n).toFixed(2) + ' in [-1, 0.3] (no free tailwind)');
+  // Gale Force (windMul 2.5 on a world with no base wind) and Chaos (1.8)
+  const gale = sample('green_valley', { windMul: 2.5 }, 9);
+  H.assertClose(gale.ev.ambAmp, 7.25, 1e-9, 'gale force amplitude');
+  H.assert(frac(gale.W, 2) >= 0.5, 'gale force |wind| > 2 on ' + (100 * frac(gale.W, 2)).toFixed(0) + '%');
+  const chaos = sample('desert_canyon', { windMul: 1.8 }, 9);
+  H.assertClose(chaos.ev.ambAmp, 4.8, 1e-9, 'chaos amplitude');
+  H.assert(frac(chaos.W, 2) >= 0.35, 'chaos |wind| > 2 on ' + (100 * frac(chaos.W, 2)).toFixed(0) + '%');
+  // ordinary worlds: no ambient field, steady base wind
+  for (const id of ['green_valley', 'rocky_highlands', 'desert_canyon', 'snow_peaks', 'volcanic_ridge', 'moon_base', 'neon_city']) {
+    const { ev, W } = sample(id, null, 3);
+    H.assert(ev.ambAmp === 0, id + ' has no ambient field');
+    const base = RR.Worlds.byId(id).wind.base || 0;
+    H.assert(W.every((w) => w === base), id + ' keeps its steady base wind');
+  }
 });
 
 H.test('coin storm, bird pouch, steep surprise, fuel zone: rewards are real and bounded', () => {
@@ -659,6 +703,172 @@ H.test('robustness: missing modules, NaN body, draw without camera, reset()', ()
   H.assert(run.events.active.length === 0 && run.env.wind === 0 && run.env.fuelZone === false, 'reset');
   H.assert(consoleErrors.length === 0, 'no swallowed errors: ' + consoleErrors[0]);
   function stepRun2(r) { r.time += DT; r.body.placeAt(r.body.x + 5 * DT); r.events.update(DT); }
+});
+
+// gameplay-4: coasting over the summit with an empty tank still clears the boss; a crash does not.
+H.test('boss summit pays out when coasting over it out of fuel (state nofuel), not when crashed', () => {
+  for (const [state, pays] of [['nofuel', true], ['crashed', false], ['ended', false]]) {
+    const run = makeRun('green_valley', { terrain: sectionTerrain(), seed: 5 });
+    run.events.nextAt = Infinity;
+    run.body.placeAt(2990);
+    for (let i = 0; i < 120; i++) stepRun(run, DT, 10);
+    H.assert(run.boss && run.boss.active, state + ': boss active');
+    run.state = state;
+    for (let i = 0; i < 60 * 40 && run.body.x < 3360; i++) stepRun(run, DT, 9);
+    const paid = run.log.bonuses.filter((b) => b.label === 'SUMMIT!');
+    if (pays) {
+      H.assert(paid.length === 1 && paid[0].coins === 3000, state + ': summit bonus ' + JSON.stringify(paid));
+      H.assert(run.tokensEarned === 1 && run.bossXp === 800 && run.stats.bossCleared === 1 && run.boss.cleared, state + ': token / xp / stats');
+    } else {
+      H.assert(paid.length === 0 && run.tokensEarned === 0 && run.bossXp === 0, state + ': nothing paid');
+    }
+  }
+});
+
+// verifier: Storm Planet's ambient gusts flipped upgraded cars over backwards on the boss headwall (a wind
+// lottery, not a climb) — they are eased down to 40 % on an uncleared boss climb and come back after it.
+H.test('ambient gusts are damped on an uncleared boss climb and restored after the summit', () => {
+  const run = makeRun('storm_planet', { terrain: sectionTerrain(), seed: 5 });
+  run.events.nextAt = Infinity;
+  const ev = run.events;
+  H.assert(ev.ambAmp > 0 && ev.ambBossMul === 1, 'full ambient field before the boss');
+  run.body.placeAt(2990);
+  for (let i = 0; i < 60 * 4; i++) stepRun(run, DT, 10);
+  H.assert(run.boss && run.boss.active, 'boss climb active');
+  H.assert(ev.ambBossMul < 0.42 && ev.ambBossMul >= 0.4, 'eased to 40 %: ' + ev.ambBossMul.toFixed(3));
+  // the gust swing is k × the free field's (same seed → same phase in a run without a boss)
+  const k = ev.ambBossMul, base = RR.Worlds.byId('storm_planet').wind.base * 0.3;
+  const ref = makeRun('storm_planet', { terrain: sectionTerrain(), seed: 5 }).events;
+  H.assert(ref.ambBossMul === 1 && ref.ambPhase === ev.ambPhase, 'reference field');
+  let worst = 0, free = 0;
+  for (let s = 0; s < 600; s += 0.25) {
+    worst = Math.max(worst, Math.abs((ev.ambientWind(s) - base) - k * (ref.ambientWind(s) - base)));
+    free = Math.max(free, Math.abs(ref.ambientWind(s) - base));
+  }
+  H.assert(worst < 1e-9 && free > 5, 'damped field = ' + k.toFixed(3) + ' × free field (free swing ' + free.toFixed(1) + ' m/s²)');
+  H.assertClose(run.env.wind, ev.ambientWind(), 1e-9, 'env.wind follows the damped ambient wind');
+  // over the summit: the field eases back to full strength
+  for (let i = 0; i < 60 * 60 && !(run.boss && run.boss.cleared); i++) stepRun(run, DT, 10);
+  H.assert(run.boss && run.boss.cleared, 'summit cleared');
+  for (let i = 0; i < 60 * 5; i++) stepRun(run, DT, 10);
+  H.assert(ev.ambBossMul > 0.99, 'restored after the summit: ' + ev.ambBossMul.toFixed(3));
+  // worlds without an ambient field never touch it
+  const calm = makeRun('green_valley', { terrain: sectionTerrain(), seed: 5 });
+  calm.events.nextAt = Infinity;
+  calm.body.placeAt(2990);
+  for (let i = 0; i < 60 * 4; i++) stepRun(calm, DT, 10);
+  H.assert(calm.events.ambBossMul === 1, 'no ambient field → untouched');
+});
+
+// gameplay-5: the 'Last Drop' daily has no fuel pickups — no refill zones either.
+H.test('fuel bonus zone never appears under modifiers.noFuelPickups', () => {
+  const run = forcedRun('green_valley', { modifiers: { noFuelPickups: true } });
+  H.assert(run.events.forceEvent('fuel_zone') === false, 'forceEvent refused');
+  run.fuel = 5;                                   // low fuel would otherwise boost its weight ×2.4
+  for (let k = 0; k < 300; k++) H.assert(run.events._pick() !== 'fuel_zone', 'scheduler picked a fuel zone');
+  const normal = forcedRun('green_valley');
+  H.assert(normal.events.forceEvent('fuel_zone') === true, 'normal runs still get zones');
+});
+
+// gameplay-6: eruptions / meteor showers are aimed so a car that HOLDS its speed is never caught;
+// braking into the eruption (or surging) still gets you burnt.
+function steadyHazardTrials(hz, worldId, v, n, speedAfter) {
+  const run = makeRun(worldId, { seed: 4242 + v * 7, invulnOnCrash: 0 });
+  const ev = run.events;
+  ev.nextAt = Infinity;
+  let hit = null, events = 0, crashed = 0, knocked = 0, guard = 0;
+  ev.onDamage = (id, kind) => { if (id === hz) hit = kind === 'crash' ? 'crash' : (hit || 'knock'); };
+  run.body.placeAt(420);
+  while (events < n && guard++ < n * 4) {
+    for (let i = 0; i < 30; i++) stepRun(run, DT, v);
+    if (!ev.forceEvent(hz)) continue;
+    hit = null;
+    const vv = speedAfter === undefined ? v : speedAfter;
+    for (let i = 0; i < 60 * 7 && ev.active.length; i++) stepRun(run, DT, vv);
+    ev._cancelAll && ev._cancelAll();
+    ev.active.length = 0;
+    events++;
+    if (hit === 'crash') crashed++; else if (hit === 'knock') knocked++;
+  }
+  return { events, crashed, knocked };
+}
+H.test('lava eruption / meteor shower: steady-speed cars at 10/15/20 m/s survive ≥ 90% (50 each)', () => {
+  for (const [hz, world] of [['lava_eruption', 'volcanic_ridge'], ['meteor_shower', 'moon_base']]) {
+    for (const v of [10, 15, 20]) {
+      const r = steadyHazardTrials(hz, world, v, 50);
+      H.assert(r.events === 50, hz + ' forced ' + r.events + '/50');
+      H.assert(r.crashed <= 5, hz + ' at ' + v + ' m/s crashed a steady car ' + r.crashed + '/50');
+      summary.push('  ' + hz + ' @' + v + ' m/s steady: crash ' + r.crashed + ', knock ' + r.knocked + ' / 50');
+    }
+  }
+  // still a hazard for a car that changes speed: halving speed at the warning, or surging 1.6×
+  const slow = steadyHazardTrials('lava_eruption', 'volcanic_ridge', 20, 30, 10);
+  const surge = steadyHazardTrials('lava_eruption', 'volcanic_ridge', 10, 30, 16);
+  H.assert(slow.crashed >= 5 && surge.crashed >= 5, 'lava must still catch speed changes (slow ' + slow.crashed + ', surge ' + surge.crashed + ' of 30)');
+});
+
+H.test('lava marker: a vent inside 60 m is drawn pulled in from the edge at its ground height', () => {
+  let tested = 0;
+  for (let k = 0; k < 16 && !tested; k++) {
+    const run = forcedRun('volcanic_ridge', { flat: true, seed: 3 + k });
+    run.renderer = { w: 1280, h: 720 };
+    run.body.vx = 18;
+    H.assert(run.events.forceEvent('lava_eruption'), 'forced');
+    const rec = run.events.active[0];
+    const d = rec.x - run.body.x;
+    H.assert(d >= 22, 'vent ≥ 22 m ahead (' + d.toFixed(1) + ')');
+    if (d >= 60) continue;                       // an 'after' plan vent: far off, ordinary edge arrow
+    const calls = [];
+    const ctx = H.createStubContext2D({ width: 1280, height: 720 });
+    const tr = ctx.translate;
+    ctx.translate = (x, y) => { calls.push([x, y]); if (tr) tr.call(ctx, x, y); };
+    run.camera.worldToScreen = (x, y, out) => { out.x = 450 + (x - run.body.x) * 50; out.y = 520 - (y - run.body.y) * 50; return out; };
+    run.events.drawScreen(ctx, run);
+    const at = calls.find((c) => Math.abs(c[0] - (1280 - 40)) < 1e-6);
+    H.assert(at, 'edge arrow at W − 40: ' + JSON.stringify(calls));
+    H.assertClose(at[1], Math.min(720 - 40, Math.max(60, 520 - (rec.y - run.body.y) * 50)), 1e-6, 'arrow at the vent ground height');
+    tested++;
+  }
+  H.assert(tested === 1, 'found a near vent to test');
+});
+
+// gameplay-9: 'sudden steep terrain' scans the real ground ahead, not only 'steep' features.
+H.test('steep surprise: finds a scanned climb window 60–250 m ahead, marks its base, uses requestFeature', () => {
+  const terrain = makeMockTerrain({ flat: true });
+  terrain.heightAt = (x) => (x < 740 ? 0 : x < 770 ? (x - 740) * 0.6 : 18);     // a 0.6 ramp 140 m ahead
+  terrain.slopeAt = (x) => (x >= 740 && x < 770 ? 0.6 : 0);
+  const run = makeRun('green_valley', { terrain, seed: 3 });
+  run.body.placeAt(600);
+  run.events.nextAt = Infinity;
+  H.assert(run.events.forceEvent('steep_surprise'), 'available from the terrain scan');
+  const rec = run.events.active[0];
+  H.assert(Math.abs(rec.x - 740) <= 1 && rec.x2 >= 750, 'window base at the climb (' + rec.x + '..' + rec.x2 + ')');
+  // nothing steep ahead, but the terrain offers the optional hook → a requested wall is announced
+  const flatT = makeMockTerrain({ flat: true });
+  let asked = null;
+  flatT.requestFeature = (type, xMin) => { asked = [type, xMin]; return { type: 'steep', x: xMin + 30, x2: xMin + 45, y: 0, meta: { dir: 1 } }; };
+  const run2 = makeRun('green_valley', { terrain: flatT, seed: 3 });
+  run2.body.placeAt(600);
+  run2.events.nextAt = Infinity;
+  H.assert(run2.events.forceEvent('steep_surprise'), 'available through requestFeature');
+  H.assert(asked && asked[0] === 'steep' && asked[1] >= 600 + 60, 'requested ' + JSON.stringify(asked));
+  const run3 = makeRun('green_valley', { terrain: makeMockTerrain({ flat: true }), seed: 3 });
+  run3.body.placeAt(600);
+  H.assert(run3.events.forceEvent('steep_surprise') === false, 'flat ground and no hook → not available');
+});
+
+H.test('pad / ramp jump SFX are timestamped for the Run take-off cue', () => {
+  const run = forcedRun('neon_city', { flat: true });
+  const ev = run.events;
+  H.assert(ev.jumpSfxAt === -Infinity, 'initially never');
+  H.assert(ev.forceEvent('moving_ramp'), 'ramp');
+  const rec = ev.active[0];
+  run.body.placeAt(rec.rx + rec.len * 0.5 + 1.02);
+  run.body.wheels[0].x = rec.rx + rec.len * 0.5;
+  run.body.wheels[0].y = 0.42;
+  stepRun(run, DT);
+  ev._update(DT);
+  H.assert(ev.jumpSfxAt > 0 && ev.time - ev.jumpSfxAt < 0.1, 'jumpSfxAt set on launch (' + ev.jumpSfxAt + ')');
 });
 
 H.test('performance: 10k updates with events active stay cheap', () => {

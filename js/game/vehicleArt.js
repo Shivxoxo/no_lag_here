@@ -16,6 +16,9 @@
  *    thruster nozzle and the direction exhaust leaves (for smoke / boost particles).
  *  - RR.VehicleArt.STYLES → frozen list of style ids.
  *  - opts.lean (−1..1) tilts the dirt-bike rider; opts.throttle also adds a subtle engine shimmy.
+ *  - opts.multiplier (0..1 or bool): 2X COINS gold aura + gold rim around the body outline with running
+ *    glints (the renderer passes the power-up's fade, so it dims over the last 2 s). opts.quality 'low'
+ *    drops the soft aura/wide glow pass. (MAGNET rings are drawn by the renderer, not here.)
  *  - draw() accepts a body with no wheel positions (wheels are then posed at rest), so it can be used for
  *    UI poses; drawPreview(..) also accepts vehicleId values that are unknown (falls back to the buggy).
  */
@@ -114,12 +117,22 @@
         maxLen: U.safeNum(susp.maxLen, staticLen + 0.2)
       };
     };
+    // gold-rim outline for the 2X COINS aura: hull pushed ~0.07 m outward from its centroid (flat list)
+    let hcx = 0, hcy = 0;
+    for (const p of hull) { hcx += U.safeNum(p.x, 0); hcy += U.safeNum(p.y, 0); }
+    hcx /= hull.length; hcy /= hull.length;
+    const rim = [];
+    for (const p of hull) {
+      const dx = U.safeNum(p.x, 0) - hcx, dy = U.safeNum(p.y, 0) - hcy, d = Math.hypot(dx, dy) || 1;
+      rim.push(hcx + dx * (1 + 0.07 / d), hcy + dy * (1 + 0.07 / d));
+    }
     const style = STYLES.indexOf(tuned && tuned.style) >= 0 ? tuned.style : 'buggy';
     const g = {
       style, x0, x1, y0, y1, L: x1 - x0, H: y1 - y0, head,
       w: [wheel(0, x0 + 0.5), wheel(1, x1 - 0.5)],
       roof: Math.max(y1, head.y + head.r + 0.07),
-      lamp: { x: x1 - 0.08, y: 0.05 }, exhaust: { x: x0, y: 0.1, a: Math.PI }
+      lamp: { x: x1 - 0.08, y: 0.05 }, exhaust: { x: x0, y: 0.1, a: Math.PI },
+      rim, rimC: { x: hcx, y: hcy }
     };
     BUILD[style](g);
     return g;
@@ -540,6 +553,51 @@
     ctx.globalAlpha = a;
     if (sp) ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
     else { ctx.fillStyle = color; ctx.beginPath(); circle(ctx, x, y, r * 0.4); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // 2X COINS: warm gold aura behind the car (not on LOW) …
+  function drawGoldAura(ctx, g, t, k) {
+    const pulse = 0.8 + 0.2 * Math.sin(t * 5);
+    const sp = RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite('#ffc933') : null;
+    if (!sp) return;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.42 * k * pulse;
+    const w = g.L * 0.85 + 1.2, h = (g.roof - g.y0) * 0.9 + 1.0;
+    ctx.drawImage(sp, g.rimC.x - w, g.rimC.y - h, w * 2, h * 2);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  // … and a gold rim traced around the body outline with twinkling glints running along it.
+  function drawGoldRim(ctx, g, t, k, low) {
+    const r = g.rim;
+    if (!r || r.length < 6) return;
+    const pulse = 0.75 + 0.25 * Math.sin(t * 6);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#ffd23f';
+    for (let pass = low ? 1 : 0; pass < 2; pass++) {
+      ctx.globalAlpha = (pass === 0 ? 0.28 : 0.85) * k * pulse;
+      ctx.lineWidth = pass === 0 ? 0.2 : 0.05;
+      ctx.beginPath();
+      poly(ctx, r);
+      ctx.stroke();
+    }
+    // two glints travelling around the rim
+    const n = r.length / 2;
+    ctx.fillStyle = '#fff6c8';
+    for (let j = 0; j < 2; j++) {
+      const u = ((t * 0.9 + j * 0.5) % 1) * n;
+      const i = Math.floor(u), f = u - i, a = i % n, b = (i + 1) % n;
+      const x = r[a * 2] + (r[b * 2] - r[a * 2]) * f, y = r[a * 2 + 1] + (r[b * 2 + 1] - r[a * 2 + 1]) * f;
+      const s = 0.13;
+      ctx.globalAlpha = 0.95 * k;
+      ctx.beginPath();
+      ctx.moveTo(x - s, y); ctx.lineTo(x, y + s * 0.3); ctx.lineTo(x + s, y); ctx.lineTo(x, y - s * 0.3); ctx.closePath();
+      ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.3, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.3, y); ctx.closePath();
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
@@ -1200,6 +1258,9 @@
     ctx.lineJoin = 'round';
     if (opts.thruster) drawIonPlume(ctx, g, sh, t);
     if (opts.boost) drawFlame(ctx, g, t, opts.boost === true ? 1 : U.clamp(U.safeNum(opts.boost, 1), 0, 1.5));
+    const mult = opts.multiplier === true ? 1 : U.clamp(U.safeNum(opts.multiplier, 0), 0, 1);
+    const low = opts.quality === 'low';
+    if (mult > 0.01 && !low) drawGoldAura(ctx, g, t, mult);
     drawSuspension(ctx, g, sh, wl);
     painter.body(ctx, g, sh, ST, t);
     const glow = g.wheelStyle.disc && RR.Particles && RR.Particles.glowSprite ? RR.Particles.glowSprite(sh.accent) : null;
@@ -1209,6 +1270,7 @@
       glowAt(ctx, '#fff2c0', g.lamp.x + 0.08, g.lamp.y, 0.5, 0.8);
       glowAt(ctx, '#ffffff', g.lamp.x, g.lamp.y, 0.16, 0.8);
     }
+    if (mult > 0.01) drawGoldRim(ctx, g, t, mult, low);
     if (opts.shield) drawShield(ctx, g, t);
     ctx.restore();
     ctx.globalAlpha = 1;

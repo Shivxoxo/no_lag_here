@@ -13,14 +13,23 @@
  *  - World thumbnails are rendered once per size (RR.Background.drawThumbnail caches them too).
  *
  * Contract additions (documented, never renames):
- *  - showResults(summary, rewards, dailyResult?) — dailyResult from RR.Daily.recordAttempt for daily runs.
+ *  - showResults(summary, rewards, dailyResult?, challenge?) — dailyResult from RR.Daily.recordAttempt for
+ *    daily runs; challenge = the DailyChallenge the run was started for (the results panel describes that
+ *    run's challenge, and says so when it expired at midnight).
+ *  - Level-ups earned while leaving results early (or from runs banked by R) stay pending and are shown
+ *    on the next menu screen / results screen — never turned into a mid-run toast.
+ *  - Garage footer: START RUN (RIDE AGAIN when opened from results) · vehicle select card: UPGRADE
+ *    (garage with {from:'vehicles'}); garage BACK returns where it came from. CONVERT TOKENS appears in
+ *    the garage once RR.Progression.tokenSinkStatus().available.
+ *  - Toasts for Bus 'saveError' (once) and 'missionAutoClaim'.
+ *  - Settings → Graphics shows an AUTO choice when RR.Save accepts quality 'auto' (feature-detected).
  *  - back()               — Esc / back button behaviour (closes the open modal first).
  *  - update(dt), onResize(), refresh() — called by the Game.
  *  - showTutorial(onDone) — first-run controls overlay (sets save.seenTutorial).
  *  - modalOpen (getter), toast(text, kind) → RR.HUD.toast.
  *  The Game object passed to init() is expected to provide: startRun(params), resume(), restart(),
  *  quitRun() (pause → QUIT: ends the run through run.quit() so collected coins count),
- *  quitToMenu(screenId?), refreshAttract(), state.
+ *  quitToMenu(screenId?, params?), refreshAttract(), state, lastParams.
  */
 (function () {
   'use strict';
@@ -89,7 +98,16 @@
     coin_rush: 'coins', storm_winds: 'wind', heavy_gravity: 'weight', chaos: 'dice'
   };
   const UPGRADE_ICONS = { engine: 'engine', suspension: 'suspension', tires: 'tires', fuel: 'fuel', grip: 'grip', air: 'air', brakes: 'brakes' };
-  const REWARD_ICONS = { vehicle: 'car', world: 'worlds', upgradeTier: 'arrow-up', cosmetic: 'paint' };
+  const REWARD_ICONS = { vehicle: 'car', world: 'worlds', upgradeTier: 'arrow-up', cosmetic: 'paint', coins: 'coin', tokens: 'token' };
+  // Screens that may show a queued level-up modal on arrival (menu screens; results decides itself).
+  const LEVELUP_SCREENS = { menu: 1, garage: 1, vehicles: 1, worlds: 1, missions: 1, daily: 1 };
+  const RECORD_MIN_PREV = 50;            // same rule as the in-run banner (run.js) and record XP
+  const MODAL_GUARD_MS = 350;            // a backdrop tap this soon after opening is the same double-tap
+  const isTouchUi = () => !!(document.body && document.body.classList.contains('touch-device'));
+  // 'auto' graphics needs RR.Save to accept it (otherwise sanitize would reset it to 'high').
+  function saveAcceptsAutoQuality() {
+    try { return RR.Save.sanitize({ settings: { quality: 'auto' } }).settings.quality === 'auto'; } catch (e) { return false; }
+  }
   const STATS = [['speed', 'SPEED'], ['accel', 'ACCEL'], ['grip', 'GRIP'], ['suspension', 'SUSP'], ['air', 'AIR'], ['fuel', 'FUEL'], ['stability', 'STABLE']];
   const CRASH_TEXT = {
     head: 'Head over heels', headHit: 'Head over heels', head_hit: 'Head over heels', flip: 'Landed on the roof',
@@ -201,15 +219,8 @@
     current = id || null;
     document.body.classList.toggle('ui-open', !!current);
     if (document.body.dataset) document.body.dataset.screen = current || 'none';
-    if (!next) {
-      // gameplay: pending level-ups that were never shown become toasts
-      if (pendingLevelUps.length) {
-        const lv = pendingLevelUps[pendingLevelUps.length - 1].level;
-        toast('Level ' + lv + ' reached!', 'levelup', 3200);
-        pendingLevelUps = [];
-      }
-      return;
-    }
+    // gameplay (no screen): pending level-ups stay queued for the next results / menu screen
+    if (!next) return;
     wallet.snapped = false;
     try { next.show(params); } catch (e) { console.error('[RR.UI] show ' + id + ' failed', e); }
     refreshBinds(next, true);
@@ -219,6 +230,9 @@
     // canvas sizes depend on layout: fit after the screen is laid out
     raf(() => { if (current === id) { fitScreenCanvases(next); drawPreviews(next, true); } });
     if (params.focus !== false) raf(() => focusPrimary(next));
+    if (LEVELUP_SCREENS[id] && pendingLevelUps.length) {
+      setTimeout(() => { if (current === id) flushLevelUps(); }, 350);
+    }
   }
 
   function focusPrimary(scr) {
@@ -455,6 +469,7 @@
               statBars('s_' + v.id + '_') +
             '</div>' +
             '<div class="veh-actions">' +
+              '<button type="button" class="btn btn-ghost btn-sm veh-upgrade" data-act="upgradeVehicle" data-arg="' + v.id + '">' + icon('arrow-up') + '<span>UPGRADE</span></button>' +
               '<button type="button" class="btn btn-teal btn-sm veh-select" data-act="selectVehicle" data-arg="' + v.id + '">SELECT</button>' +
               '<span class="veh-selected-tag">' + icon('check') + 'READY</span>' +
             '</div>' +
@@ -562,18 +577,45 @@
           '</div>' +
           '<div class="garage-right">' +
             '<div class="coins-banner">' + icon('coin') + '<span>Coins:</span><b data-bind="coins">0</b></div>' +
+            '<div class="token-sink panel" data-ref="sink" hidden>' +
+              '<span class="ts-ic">' + icon('token') + '</span>' +
+              '<span class="ts-text"><b data-ref="sinkTitle">SPARE TOKENS</b><small data-ref="sinkText"></small></span>' +
+              '<button type="button" class="btn btn-teal btn-sm" data-act="convertTokens" data-ref="sinkBtn">' + icon('coin') + '<span>CONVERT</span></button>' +
+            '</div>' +
             '<div class="upg-list">' + rows + '</div>' +
             '<p class="garage-tip" data-ref="tip"></p>' +
           '</div>' +
-        '</div>';
+        '</div>' +
+        '<footer class="scr-foot garage-foot">' +
+          '<div class="world-chip">' +
+            '<canvas class="wc-thumb" data-ref="worldThumb"></canvas>' +
+            '<div class="wc-text"><small data-ref="footCap">WORLD</small><b data-ref="worldName">Green Valley</b></div>' +
+          '</div>' +
+          '<button type="button" class="btn btn-primary btn-lg btn-start" data-act="garageStart" data-ref="startBtn">' + icon('play') + '<span data-ref="startLabel">START RUN</span></button>' +
+        '</footer>';
       this.preview = registerPreview(this, node.querySelector('[data-ref="canvas"]'), 'vehicle', () => this.vid);
+      this.thumb = registerPreview(this, node.querySelector('[data-ref="worldThumb"]'), 'thumb', 'green_valley');
       this.vid = 'trail_buggy';
     },
     show(params) {
       const d = S();
       this.from = params.from || null;
       this.vid = params.vehicleId && d.unlockedVehicles.indexOf(params.vehicleId) >= 0 ? params.vehicleId : d.selectedVehicle;
+      if (this.vid !== d.selectedVehicle) RR.Progression.selectVehicle(this.vid);
       this.refresh();
+    },
+    // What START / RIDE AGAIN launches: the last run's world (and today's challenge for a daily) when
+    // the garage was opened from results, otherwise the selected world.
+    runTarget() {
+      const d = S();
+      const lp = this.from === 'results' && game ? game.lastParams : null;
+      if (lp && lp.daily) {
+        let ch = null;
+        try { ch = RR.Daily.getChallenge(); } catch (e) { ch = null; }
+        if (ch) return { worldId: ch.worldId, daily: ch };
+      }
+      const wid = lp && lp.worldId && d.unlockedWorlds.indexOf(lp.worldId) >= 0 ? lp.worldId : d.selectedWorld;
+      return { worldId: wid, daily: null };
     },
     refresh(changedCat) {
       const d = S(), r = this.refs, vid = this.vid;
@@ -595,7 +637,7 @@
             pips[i].animate([{ transform: 'scale(.3)', filter: 'brightness(3)' }, { transform: 'scale(1.5)', offset: 0.5 }, { transform: 'scale(1)', filter: 'brightness(1)' }], { duration: 480, easing: 'ease-out' });
           }
         }
-        const cur = RR.Vehicles.describeUpgrade(vid, c.id, lv);
+        const cur = RR.Vehicles.describeUpgrade(vid, c.id, lv, ups);
         r['cur_' + c.id].textContent = cur.value;
         const row = r['btn_' + c.id].parentNode;
         row.classList.toggle('maxed', cu.reason === 'max');
@@ -603,7 +645,7 @@
           r['next_' + c.id].textContent = 'MAX';
           r['det_' + c.id].textContent = cur.detail || '';
         } else {
-          const nx = RR.Vehicles.describeUpgrade(vid, c.id, lv + 1);
+          const nx = RR.Vehicles.describeUpgrade(vid, c.id, lv + 1, ups);
           r['next_' + c.id].textContent = nx.value;
           r['det_' + c.id].textContent = nx.detail || '';
         }
@@ -642,13 +684,28 @@
       }
       const pm = RR.Progression.COSMETICS.find((p) => p.id === selPaint);
       r.paintName.textContent = pm ? pm.name : 'Factory';
+      // footer: where the next run goes
+      const tgt = this.runTarget();
+      const w = RR.Worlds.byId(tgt.worldId);
+      r.footCap.textContent = tgt.daily ? 'DAILY CHALLENGE' : 'WORLD';
+      r.worldName.textContent = tgt.daily ? tgt.daily.name + ' · ' + (w ? w.name : '') : (w ? w.name : '—');
+      r.startLabel.textContent = this.from === 'results' ? 'RIDE AGAIN' : 'START RUN';
+      if (this.thumb.id !== tgt.worldId) { this.thumb.id = tgt.worldId; this.thumb.drawn = false; }
+      // token sink (only once every vehicle is owned)
+      let sink = null;
+      try { sink = RR.Progression.tokenSinkStatus ? RR.Progression.tokenSinkStatus() : null; } catch (e) { sink = null; }
+      r.sink.hidden = !(sink && sink.available);
+      if (sink && sink.available) {
+        r.sinkTitle.textContent = fmt(sink.tokens) + ' SPARE TOKEN' + (sink.tokens === 1 ? '' : 'S');
+        r.sinkText.textContent = 'Every vehicle is yours — trade tokens for ' + fmt(sink.value) + ' coins each';
+      }
       const tier = RR.Progression.maxUpgradeLevel(d.level);
       r.tip.textContent = tier < RR.Vehicles.MAX_UPGRADE_LEVEL
         ? 'Upgrade tier: up to LV ' + tier + '. Reach player level ' + RR.Progression.requiredLevelForUpgrade(tier + 1) + ' to unlock LV ' + (tier + 1) + '+.'
         : 'All upgrade tiers unlocked.';
       paintStamp++;
     },
-    back() { show(this.from === 'vehicles' ? 'vehicles' : 'menu'); }
+    back() { show(this.from === 'vehicles' ? 'vehicles' : 'menu'); }   // from results / menu → menu
   });
 
   // ---------------------------------------------------------------- WORLDS
@@ -920,7 +977,8 @@
               toggleHtml('sound', 'sound', 'Sound effects', 'Engine, coins, crashes and UI') +
             '</div>' +
             '<div class="set-group panel"><h4>DISPLAY</h4>' +
-              segHtml('quality', 'graphics', 'Graphics', [['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH']], 'Lower = faster on older devices') +
+              segHtml('quality', 'graphics', 'Graphics', (saveAcceptsAutoQuality() ? [['auto', 'AUTO']] : []).concat([['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH']]),
+                'Lower = faster on older devices' + (saveAcceptsAutoQuality() ? ' · AUTO adapts to your device' : '')) +
               toggleHtml('reducedMotion', 'motion', 'Reduced motion', 'Less shake, zoom and UI animation') +
               toggleHtml('showFps', 'fps', 'Show FPS', 'Frame-rate counter in the HUD') +
             '</div>' +
@@ -1009,7 +1067,7 @@
             '<button type="button" class="btn" data-act="settings" data-arg="pause">' + icon('settings') + '<span>SETTINGS</span></button>' +
             '<button type="button" class="btn btn-danger-ghost" data-act="quit">' + icon('quit') + '<span>QUIT</span></button>' +
           '</div>' +
-          '<p class="pause-hint">' + icon('info') + '<span data-ref="hint">Quitting ends the run — coins you collected still count.</span></p>' +
+          '<p class="pause-hint">' + icon('info') + '<span data-ref="hint">Restarting or quitting keeps the coins you collected.</span></p>' +
         '</div>';
     },
     show() {
@@ -1044,6 +1102,7 @@
             '<div class="res-title" data-ref="title">RUN COMPLETE</div>' +
             '<div class="res-reason" data-ref="reason"></div>' +
             '<div class="res-record" data-ref="record">' + icon('trophy') + '<span>NEW RECORD!</span></div>' +
+            '<div class="res-first" data-ref="first" hidden></div>' +
           '</div>' +
           '<div class="res-body">' +
             '<div class="res-main panel">' +
@@ -1068,7 +1127,7 @@
             '</div>' +
           '</div>' +
           '<div class="res-btns">' +
-            '<button type="button" class="btn btn-primary btn-lg" data-act="retry" data-autofocus>' + icon('restart') + '<span>RETRY</span><kbd>R</kbd></button>' +
+            '<button type="button" class="btn btn-primary btn-lg" data-act="retry" data-autofocus>' + icon('restart') + '<span>RETRY</span><kbd class="kbd-hint">R</kbd></button>' +
             '<button type="button" class="btn" data-act="toGarage">' + icon('garage') + '<span>GARAGE</span></button>' +
             '<button type="button" class="btn" data-act="toMenu">' + icon('home') + '<span>MENU</span></button>' +
           '</div>' +
@@ -1091,15 +1150,34 @@
       const reason = s.endReason === 'fuel' ? 'Out of fuel' : s.endReason === 'quit' ? 'Run ended' : 'Crashed — ' + crashText(s.crashReason);
       r.reason.textContent = reason;
       r.title.textContent = s.mode === 'daily' ? 'DAILY RUN COMPLETE' : 'RUN COMPLETE';
-      const record = !!(rw.newRecord || rw.newWorldRecord);
-      r.record.classList.remove('on');
-      r.record.querySelector('span').textContent = rw.newRecord ? 'NEW RECORD!' : 'NEW WORLD RECORD!';
-      // static values
+      const isDaily = s.mode === 'daily';
       const dist = Math.floor(num(s.distance, 0));
       const w = RR.Worlds.byId(s.worldId);
-      const best = Math.max(dist, num(rw.previousBest, 0), w ? num(S().bestDistances[w.id], 0) : 0);
-      r.bestLabel.textContent = record ? 'PREVIOUS BEST' : 'BEST' + (w ? ' · ' + w.name.toUpperCase() : '');
-      r.best.textContent = fmt(record ? num(rw.previousBest, 0) : best) + ' m';
+      const prevBest = num(rw.previousBest, 0);
+      // A record needs a real previous best (same ≥ 50 m rule as the in-run banner and record XP): a
+      // world's first run (or a 5 m crash) is not a celebration. Dailies never set permanent records;
+      // they celebrate beating today's best instead.
+      const dailyExpired = !!(dr && dr.expired);
+      const dailyPrev = num(rw.dailyBestPrev, 0);
+      const newDailyBest = isDaily && !dailyExpired && !!(rw.newDailyBest || s.newDailyBest);
+      const record = isDaily ? newDailyBest && dailyPrev >= RECORD_MIN_PREV
+        : !!(rw.newRecord || rw.newWorldRecord) && prevBest >= RECORD_MIN_PREV;
+      const firstRun = !isDaily && !!w && !!(rw.newWorldRecord || rw.newRecord) && prevBest <= 0 && dist > 0;
+      r.record.classList.remove('on');
+      r.record.querySelector('span').textContent = isDaily ? 'NEW DAILY BEST!' : rw.newRecord ? 'NEW RECORD!' : 'NEW WORLD RECORD!';
+      r.first.hidden = !firstRun;
+      r.first.textContent = firstRun ? 'First run on ' + w.name : '';
+      // static values
+      if (isDaily) {
+        // today's best for this challenge (the permanent world best is untouched by dailies)
+        const bestToday = dailyExpired ? dist : Math.max(dist, dailyPrev, dr ? num(dr.best, 0) : 0);
+        r.bestLabel.textContent = record ? 'PREVIOUS BEST TODAY' : dailyExpired ? 'THIS RUN' : 'BEST TODAY';
+        r.best.textContent = fmt(record ? dailyPrev : bestToday) + ' m';
+      } else {
+        const best = Math.max(dist, prevBest, w ? num(S().bestDistances[w.id], 0) : 0);
+        r.bestLabel.textContent = record ? 'PREVIOUS BEST' : 'BEST' + (w ? ' · ' + w.name.toUpperCase() : '');
+        r.best.textContent = fmt(record ? prevBest : best) + ' m';
+      }
       const coins = num(rw.coins, num(s.coins, 0)), bonus = num(rw.bonusCoins, num(s.bonusCoins, 0));
       const tokens = num(rw.tokens, 0);
       const xp = rw.xp || { total: 0 };
@@ -1124,22 +1202,31 @@
         if (n > 0) th += '<span class="trick-chip">' + icon(ic) + '<span>' + label + '</span><b>×' + n + '</b></span>';
       }
       if (num(s.maxCombo, 0) >= 2) th += '<span class="trick-chip combo">' + icon('boost') + '<span>Best combo</span><b>×' + Math.floor(s.maxCombo) + '</b></span>';
-      r.tricks.innerHTML = th || '<p class="empty">No tricks this time — lean back (W / ↺) with the gas held in the air to backflip!</p>';
+      r.tricks.innerHTML = th || '<p class="empty">' + (isTouchUi()
+        ? 'No tricks this time — hold the ↺ TILT button with GAS in the air to backflip!'
+        : 'No tricks this time — lean back (W / ↺) with the gas held in the air to backflip!') + '</p>';
       // daily
-      if (s.mode === 'daily' || dr) {
+      if (isDaily || dr) {
         r.daily.hidden = false;
-        let ch = null;
-        try { ch = RR.Daily.getChallenge(); } catch (e) { ch = null; }
-        const target = dr ? dr.target : ch ? ch.targetDistance : 0;
+        // the challenge this run was played for (not "today's", which may have changed at midnight)
+        let ch = data.challenge || null;
+        if (!ch) { try { ch = RR.Daily.getChallenge(s.dailyDay || undefined); } catch (e) { ch = null; } }
+        const target = dr ? num(dr.target, 0) : ch ? ch.targetDistance : num(s.targetDistance, 0);
         const done = dr && dr.completedNow;
-        const already = !done && ch && RR.Daily.status().completed;
+        let already = false;
+        if (!done && !dailyExpired && ch) {
+          try { const st = RR.Daily.status(); already = !!st.completed && st.day === ch.day; } catch (e) { already = false; }
+        }
+        const bestToday = dr ? num(dr.best, dist) : dist;
         const pct = U.clamp(dist / Math.max(1, target), 0, 1);
-        r.daily.className = 'res-daily panel' + (done ? ' won' : '');
-        r.daily.innerHTML = '<h4>' + icon('daily') + 'DAILY CHALLENGE' + (ch ? ' · ' + esc(ch.name.toUpperCase()) : '') + '</h4>' +
+        r.daily.className = 'res-daily panel' + (done ? ' won' : '') + (dailyExpired ? ' expired' : '');
+        r.daily.innerHTML = '<h4>' + icon('daily') + 'DAILY CHALLENGE' + (ch ? ' · ' + esc(String(ch.name).toUpperCase()) : '') + '</h4>' +
           '<div class="progress"><i style="transform:scaleX(' + pct.toFixed(3) + ')"></i></div>' +
-          '<p>' + (done ? '<b class="ok">' + icon('check') + 'TARGET REACHED!</b> ' + rewardChips(dr.reward)
-            : already ? '<b class="ok">' + icon('check') + 'Already completed today</b> · best ' + fmt(dr ? dr.best : dist) + ' m'
-              : fmt(dist) + ' / ' + fmt(target) + ' m · best today ' + fmt(dr ? dr.best : dist) + ' m') + '</p>';
+          '<p>' + (dailyExpired ? '<b class="warn">' + icon('clock') + 'Challenge expired at midnight</b> · ' + fmt(dist) + ' / ' + fmt(target) + ' m — a new challenge is up'
+            : done ? '<b class="ok">' + icon('check') + 'TARGET REACHED!</b> ' + rewardChips(dr.reward)
+              : already ? '<b class="ok">' + icon('check') + 'Already completed today</b> · best ' + fmt(bestToday) + ' m'
+                : fmt(dist) + ' / ' + fmt(target) + ' m · best today ' + fmt(bestToday) + ' m') +
+          (newDailyBest && dailyPrev > 0 && !done ? ' <b class="ok nb">' + icon('trophy') + 'NEW DAILY BEST</b>' : '') + '</p>';
       } else {
         r.daily.hidden = true;
       }
@@ -1191,6 +1278,7 @@
 
   // ================================================================= MODALS
   let modalEl = null, modalRefs = null, modalState = null;
+  let modalOpenedAt = 0;
   let screenConfetti = null;             // confetti over any screen (the modal's own host is hidden when closed)
   const modalQueue = [];
 
@@ -1213,7 +1301,10 @@
     buildConfetti(screenConfetti, 36);
     try { modalEl.inert = true; } catch (e) { /* ignore */ }
     modalEl.addEventListener('pointerdown', (e) => {
-      if (e.target === modalEl && modalState && modalState.dismissable) closeModal(false);
+      if (e.target !== modalEl || !modalState || !modalState.dismissable) return;
+      // the second tap of a double-tap that opened the modal must not dismiss it
+      if (nowMs() - modalOpenedAt < MODAL_GUARD_MS) return;
+      closeModal(false);
     });
   }
 
@@ -1229,6 +1320,7 @@
     if (!item) { modalState = null; return; }
     const spec = item.spec;
     modalState = { resolve: item.resolve, dismissable: spec.dismissable !== false, onClose: spec.onClose, type: spec.type };
+    modalOpenedAt = nowMs();
     modalEl.className = 'modal open modal-' + (spec.type || 'confirm');
     modalRefs.icon.innerHTML = spec.iconHtml || (spec.icon ? icon(spec.icon) : '');
     modalRefs.icon.hidden = !(spec.iconHtml || spec.icon);
@@ -1257,6 +1349,11 @@
     st.resolve(!!result);
     setTimeout(() => { if (!modalState) nextModal(); if (!modalState) focusPrimary(screens[current]); }, 180);
   }
+
+  const nowMs = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+  // A confirm is already open or queued: a second activation (double click, Enter auto-repeat) of the
+  // same button must not queue another one.
+  const modalBusy = () => !!modalState || modalQueue.length > 0;
 
   function confirm(title, msg, okLabel, opts) {
     opts = opts || {};
@@ -1385,6 +1482,7 @@
       if (game && game.refreshAttract) game.refreshAttract();
     },
     unlockVehicle(arg, btn) {
+      if (modalBusy()) return;
       const [id, method] = String(arg).split('|');
       const v = RR.Vehicles.byId(id);
       const st = RR.Progression.vehicleStatus(id);
@@ -1398,6 +1496,8 @@
       const price = method === 'tokens' ? st.tokens + ' token' + (st.tokens === 1 ? '' : 's') : fmt(st.coins) + ' coins';
       confirm('UNLOCK ' + v.name.toUpperCase() + '?', 'Spend ' + price + ' to unlock the ' + v.name + '?', 'UNLOCK', { icon: 'unlock' }).then((ok) => {
         if (!ok) return;
+        // re-check: the status the dialog was built from may be stale by now
+        if (RR.Progression.vehicleStatus(id).unlocked) { refreshCurrent(); return; }
         const res = RR.Progression.unlockVehicle(id, method);
         if (res.ok) {
           play('unlock');
@@ -1416,6 +1516,31 @@
     start() {
       const d = S();
       if (game) game.startRun({ worldId: d.selectedWorld, vehicleId: d.selectedVehicle, daily: null });
+    },
+    upgradeVehicle(id) {
+      if (!RR.Progression.vehicleStatus(id).unlocked) { play('error'); return; }
+      show('garage', { from: 'vehicles', vehicleId: id });
+    },
+    garageStart() {
+      const g = screens.garage;
+      const t = g.runTarget();
+      if (game) game.startRun({ worldId: t.worldId, vehicleId: g.vid, daily: t.daily });
+    },
+    convertTokens(arg, btn) {
+      if (modalBusy()) return;
+      const st = RR.Progression.tokenSinkStatus ? RR.Progression.tokenSinkStatus() : null;
+      if (!st || !st.available) { play('error'); shake(btn); return; }
+      const n = st.tokens;
+      confirm('CONVERT ' + n + ' TOKEN' + (n === 1 ? '' : 'S') + '?', 'Trade ' + n + ' token' + (n === 1 ? '' : 's') + ' for ' + fmt(n * st.value) + ' coins to spend on upgrades?', 'CONVERT', { icon: 'token' }).then((ok) => {
+        if (!ok) return;
+        const res = RR.Progression.convertTokens();
+        if (res && res.ok) {
+          play('coinBig');
+          toast('+' + fmt(res.coins) + ' coins for ' + res.tokens + ' token' + (res.tokens === 1 ? '' : 's'), 'reward');
+          refreshCurrent();
+          bumpWallet(currentScreen());
+        } else { refreshCurrent(); }
+      });
     },
 
     garageCycle(dir) {
@@ -1459,7 +1584,7 @@
         g.refresh();
         // repaint the menu's attract car in place (cheaper than rebuilding the run)
         const att = game && game.attract;
-        if (att && att.vehicleId === g.vid) att.colors = RR.Progression.getPaint(g.vid);
+        if (att && att.vehicleId === g.vid) { att.colors = RR.Progression.getPaint(g.vid); if (game.requestRender) game.requestRender(); }
         else if (game && game.refreshAttract) game.refreshAttract();
       }
     },
@@ -1478,6 +1603,7 @@
       if (game) game.startRun({ worldId: id, vehicleId: d.selectedVehicle, daily: null });
     },
     unlockWorld(id, btn) {
+      if (modalBusy()) return;
       const w = RR.Worlds.byId(id);
       const st = RR.Progression.worldStatus(id);
       if (!w || !st.canBuy) {
@@ -1488,6 +1614,7 @@
       }
       confirm('UNLOCK ' + w.name.toUpperCase() + '?', 'Spend ' + fmt(st.coins) + ' coins to open ' + w.name + '?', 'UNLOCK', { icon: 'unlock' }).then((ok) => {
         if (!ok) return;
+        if (RR.Progression.worldStatus(id).unlocked) { refreshCurrent(); return; }
         const res = RR.Progression.unlockWorld(id);
         if (res.ok) {
           play('unlock');
@@ -1549,6 +1676,7 @@
     },
     howToPlay() { showTutorial(null); },
     resetSave() {
+      if (modalBusy()) return;
       confirm('RESET ALL PROGRESS?', 'This permanently erases your coins, levels, unlocks, upgrades, records and missions. This cannot be undone.', 'RESET', { danger: true }).then((ok) => {
         if (!ok) return;
         RR.Save.reset();                                        // emits 'saveReset' → Game re-applies everything
@@ -1561,19 +1689,20 @@
     resume() { if (game) game.resume(); },
     restart() { if (game) game.restart(); },
     quit() {
+      if (modalBusy()) return;
       confirm('QUIT THIS RUN?', 'The run ends now. Coins and distance you already earned still count.', 'QUIT', { icon: 'quit' }).then((ok) => {
-        if (ok && game) game.quitRun();
+        if (ok && game && game.state === 'paused') game.quitRun();
       });
     },
 
     retry() { if (game) game.restart(); },
-    toGarage() { if (game) game.quitToMenu('garage'); },
+    toGarage() { if (game) game.quitToMenu('garage', { from: 'results' }); },
     toMenu() { if (game) game.quitToMenu('menu'); },
 
     modal(arg) { closeModal(arg === 'ok'); }
   };
   // Actions that play their own feedback sound.
-  const SILENT = { selectVehicle: 1, unlockVehicle: 1, garageCycle: 1, upgrade: 1, paint: 1, selectWorld: 1, unlockWorld: 1, claim: 1, claimBonus: 1, toggleSetting: 1, setSetting: 1, dailyVehicle: 1, resetSave: 1 };
+  const SILENT = { convertTokens: 1, selectVehicle: 1, unlockVehicle: 1, garageCycle: 1, upgrade: 1, paint: 1, selectWorld: 1, unlockWorld: 1, claim: 1, claimBonus: 1, toggleSetting: 1, setSetting: 1, dailyVehicle: 1, resetSave: 1 };
 
   function onClick(e) {
     const t = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
@@ -1641,8 +1770,9 @@
     drawPreviews(scr, true);
   }
 
-  function showResults(summary, rewards, dailyResult) {
-    resultsData = { summary: summary || {}, rewards: rewards || {}, dailyResult: dailyResult || null };
+  function showResults(summary, rewards, dailyResult, challenge) {
+    resultsData = { summary: summary || {}, rewards: rewards || {}, dailyResult: dailyResult || null,
+      challenge: challenge && typeof challenge === 'object' ? challenge : null };
     show('results');
   }
 
@@ -1677,6 +1807,29 @@
         if (item) toast(item.name + ' unlocked!', 'unlock', 3000);
       });
       RR.Bus.on('missionClaimed', () => updateBadges());
+      // yesterday's completed-but-unclaimed missions were paid at midnight rollover
+      RR.Bus.on('missionAutoClaim', (p) => {
+        const rw = (p && p.reward) || {};
+        const bits = [];
+        if (rw.coins > 0) bits.push('+' + fmt(rw.coins) + ' coins');
+        if (rw.xp > 0) bits.push('+' + fmt(rw.xp) + ' XP');
+        if (rw.tokens > 0) bits.push('+' + rw.tokens + ' token' + (rw.tokens === 1 ? '' : 's'));
+        if (bits.length) toast("Yesterday's missions paid: " + bits.join(' · '), 'mission', 4200);
+        updateBadges();
+        if (current === 'missions') refreshCurrent();
+        else if (current) refreshBinds(screens[current], false);
+      });
+      // storage full / blocked: say it once instead of silently losing progress
+      let saveErrorShown = false;
+      RR.Bus.on('saveError', (p) => {
+        if (saveErrorShown) return;
+        saveErrorShown = true;
+        const reason = p && p.reason;
+        toast(reason === 'unavailable' ? 'Storage unavailable — progress lasts this session only'
+          : "Progress can't be saved — browser storage is full or blocked", 'error', 6000);
+        if (current === 'settings') screens.settings.refresh();
+      });
+      RR.Bus.on('wallet', () => { if (current === 'garage') refreshCurrent(); });
       RR.Bus.on('saveReset', () => {
         pendingLevelUps = [];
         for (const k of Object.keys(screens)) { const s = screens[k]; if (s.canvases) for (const p of s.canvases) p.drawn = false; }

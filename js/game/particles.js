@@ -11,7 +11,8 @@
  *    (round-robin cursor) so fresh effects always win over fading ones.
  *  - Every type has a small descriptor (life, speed, size, gravity/wind response, drag, look). Glowing
  *    types are drawn additively ('lighter') with pre-rendered, colour-tinted glow sprites — no shadowBlur.
- *  - setQuality('low'|'medium'|'high') scales emitted counts (and the effective pool size).
+ *  - setQuality('low'|'medium'|'high') scales emitted counts (and the effective pool size); LOW also draws
+ *    smaller additive glow sprites (fill-rate). Unknown values (e.g. 'auto') fall back to 'high'.
  *
  * Contract additions (callers may ignore):
  *  - p.count (live particles), p.capacity, p.quality, p.countOf(type).
@@ -363,7 +364,7 @@
         if (ti === T.ember.index) a *= 0.65 + 0.35 * Math.sin(this._time * 18 + this.seed[i]);
         if (a <= 0.01) continue;
         ctx.globalAlpha = a;
-        const r = s * 2.6;
+        const r = s * (this.quality === 'low' ? 1.9 : 2.6);   // LOW: ~half the additive glow pixels
         if (sprite) ctx.drawImage(sprite, this.x[i] - r, this.y[i] - r, r * 2, r * 2);
         else { ctx.beginPath(); ctx.arc(this.x[i], this.y[i], s, 0, TAU); ctx.fill(); }
       }

@@ -41,6 +41,13 @@
  *   b.setPose(x, y, angle) / b.setVelocity(vx, vy)  teleport helpers (tests, tools, attract mode)
  *   Brake input: brakes while rolling forward; once nearly stopped it becomes reverse, and the
  *   brakes keep holding against forward rolling (so braking facing downhill holds the car).
+ *   b.driveLimit    0..1 share of the drive torque the wheelie/launch limiter removed in the last step
+ *   (review fixes) Wheelie/launch limiter: without W the drive force is capped at what keeps the front
+ *   wheel down (and fades out between ~46° and ~63° so a D-only wheelie is not held; the rear brake drops a
+ *   nose heading over backwards); on a tail stand the drive fades
+ *   out even with W. So maxed cars no longer wheelie-flip at full throttle on the flat or on slopes, and
+ *   autopilots need not feather the throttle for that; deliberate W wheelies and gas launches still work.
+ *   Gas/brake air rotation fades in over 0.25–0.8 s of air time (explicit W/S lean keeps AIR_RAMP).
  */
 (function () {
   'use strict';
@@ -77,6 +84,9 @@
   const THROTTLE_AIR_LEAN = 0.5;     // gas in the air → backflip torque, brake → frontflip (integration: was 0.85 —
                                      // holding gas through a 1.2 s hop spun the car 190° onto its head; W + gas
                                      // still gives the full air torque for deliberate flips)
+  const THROTTLE_AIR_LO = 0.25;      // s: the gas/brake share of air rotation fades in between these air times, so
+  const THROTTLE_AIR_HI = 0.8;       // a 1 s crest hop held on gas turns ≤ ~40° while long jumps keep the gas-flip
+                                     // feel (explicit W/S lean keeps the short AIR_RAMP)
   const REVERSE_ENTER = 0.6;         // m/s: below this forward speed, brake input becomes reverse
   const REVERSE_EXIT = 1.6;          // m/s: hysteresis
   const BOOST_ACCEL = 0.9 * CONST.GRAVITY;
@@ -84,6 +94,33 @@
   const BEARING_TORQUE = 1.5;        // N·m of hub friction so free wheels eventually stop spinning
   const DAMP_BUMP = 0.75;            // damper multiplier while compressing …
   const DAMP_REBOUND = 1.5;          // … and while extending (rebound-heavy, like real dampers)
+
+  // Wheelie / launch limiter (a driver aid acting on the drive torque; brakes, reverse and air are untouched).
+  //  · Launch control, only while W is NOT held: the forward drive force is capped so the pitch-up moment it
+  //    produces about the rear contact (F·h) stays below LAUNCH_MARGIN × the restoring moment (gravity at the
+  //    centre of mass, M·g·cosφ·d, plus any S lean). It blends in only as the front wheel's load reaches zero
+  //    (feedback), so it never touches ordinary driving or cars that cannot lift their nose, and it looks
+  //    PITCH_LOOKAHEAD s ahead along the current pitch rate. With that feedback a margin of 1.0 keeps the
+  //    front wheel skimming the ground at the best possible launch; 0.85 cost 4–10 % of 0→60 on cars that
+  //    never wheelie. Climbing ability with S held is unchanged; only the "bounce the front" technique goes.
+  //    When the pitch heads past the balance point (centre of mass behind the rear contact) the rear brake
+  //    is applied as well, which drops the nose the way a rider taps the rear brake.
+  //  · Tail-stand fade (always): past ~63° of pitch relative to the ground under the rear wheel, with the tail
+  //    dragging or the front wheel up for a while, the drive torque fades out so a car cannot ride on its tail.
+  //  · Tail scraping has more friction than the rest of the hull, so a dragging tail slows the car instead of
+  //    skating along.
+  const LAUNCH_MARGIN = 1.0;
+  const LAUNCH_LOAD_LO = 0.0;        // front-wheel load (fraction of its static load) where the cap is fully on …
+  const LAUNCH_LOAD_HI = 0.08;       // … and where it has faded out completely
+  const PITCH_LOOKAHEAD = 0.12;      // s
+  const TAIL_FADE_LO = 1.1;          // rad relative pitch: drive torque starts fading …
+  const TAIL_FADE_HI = 1.35;         // … and is gone here
+  const HIGH_WHEELIE_LO = 0.8;       // rad: without W, launch control also fades the drive from here to TAIL_FADE_LO
+  const TAIL_FRONT_AIR = 0.3;        // s the front wheel must be up for the fade to apply without tail contact
+  const TAIL_FRICTION = 0.9;         // rear hull points (× surface friction)
+  const FLIP_BRAKE = 0.7;            // rear brake (fraction of brakeTorque) once the pitch heads past the balance point …
+  const FLIP_BRAKE_ANGLE = 0.25;     // … reached this many rad beyond it (still only while W is not held)
+  const TAIL_ZONE = 0.55;            // hull points behind this fraction of the rearmost hull x count as "tail"
 
   const torqueCurve = (u) => (u <= 0 ? 1 : u >= 1 ? 0 : 1 - u * u * u);
   const pos = (v, d) => (isNum(v) && v > 0 ? v : d);
@@ -108,6 +145,7 @@
     this.surface = null;
     this.ceiling = false;
     this.head = false;
+    this.tail = false;                 // rear hull point (scrape friction, tail-stand detection)
   }
 
   // ------------------------------------------------------------------ tuned-params normalisation
@@ -156,6 +194,8 @@
         staticLen: clamp(sLen, P.minLen, P.maxLen)
       });
     }
+    P.share = share;
+    P.totalMass = P.mass + P.wheels[0].m + P.wheels[1].m;
     P.torque = pos(motor.torque, 900);
     P.maxOmega = pos(motor.maxOmega, 50);
     P.reverseTorque = pos(motor.reverseTorque, P.torque * 0.6);
@@ -232,8 +272,10 @@
       this._hullPts = pts;
       this._hullC = [];
       this._hullCeil = [];
+      let hullMinX = 0;
+      for (const p of pts) hullMinX = Math.min(hullMinX, p.x);
       for (const p of pts) {
-        const c = new Contact(); c.lx = p.x; c.ly = p.y; this._hullC.push(c);
+        const c = new Contact(); c.lx = p.x; c.ly = p.y; c.tail = p.x < TAIL_ZONE * hullMinX; this._hullC.push(c);
         const d = new Contact(); d.lx = p.x; d.ly = p.y; d.ceiling = true; this._hullCeil.push(d);
       }
       this._headC = new Contact();
@@ -264,6 +306,7 @@
       this.rpm = 0;
       this.engineLoad = 0;
       this.nanRecoveries = 0;
+      this.driveLimit = 0;             // 0..1 share of drive torque removed by the wheelie/launch limiter (last step)
 
       // internals
       this._terrain = null;
@@ -273,6 +316,9 @@
       this._hPrev = 0;
       this._margin = 0.05;
       this._landWindow = 0;
+      this._tailContact = false;       // a tail hull point touched the ground in the last sub-step
+      this._flipBrake = 0;             // 0..1 wheelie-control rear brake for this sub-step
+      this._frontAirT = 0;             // s the front wheel has been off the ground while the rear is on it
       this._lsdMass = 0; this._lsdMax = 0; this._lsdAcc = 0;
       this._ctl = { throttle: 0, lean: 0, handbrake: false, boost: 0, engineOn: true };
       this._env = { terrain: null, g: CONST.GRAVITY, wind: 0, frictionMul: 1, airDrag: DEFAULT_AIR_DRAG, sensitivity: 1 };
@@ -827,8 +873,10 @@
       let torque = 0;
       if (airborne) {
         const airF = clamp(this.airTime / AIR_RAMP, 0, 1);
-        const lean = clamp(ctl.lean + (ctl.engineOn ? ctl.throttle * THROTTLE_AIR_LEAN : 0), -1, 1);
-        torque = P.airTorque * lean * E.sensitivity * airF;
+        const thrLean = ctl.engineOn
+          ? ctl.throttle * THROTTLE_AIR_LEAN * U.smoothstep(THROTTLE_AIR_LO, THROTTLE_AIR_HI, this.airTime) : 0;
+        const lean = clamp(ctl.lean * airF + thrLean, -1, 1);
+        torque = P.airTorque * lean * E.sensitivity;
         // Air angular damping, expressed as a torque on the whole assembly's inertia.
         const ieffRatio = this._ieffRatio || 1;
         const k = Math.min(1, P.angularDampingAir * h * ieffRatio);
@@ -886,6 +934,8 @@
 
       let ieff = P.inertia;
       let motorUsedMax = 0;
+      this._flipBrake = 0;
+      const driveScale = thr > 0.02 && ctl.engineOn ? this._driveScale(ctl, E, thr) : (this.driveLimit = 0, 1);
       for (const w of this.wheels) {
         const wp = w._p;
         // strut geometry
@@ -934,12 +984,14 @@
         if (thr > 0.02) {
           if (ctl.engineOn && wp.drive > 0) {
             const u = -rel / P.maxOmega;
-            const tq = P.torque * torqueCurve(u) * thr * wp.drive;
+            const tq = P.torque * torqueCurve(u) * thr * wp.drive * driveScale;
             w._mTarget = -P.maxOmega; w._mLo = -tq * h; w._mHi = 0;
             w._mMax = P.torque * thr * wp.drive * h;
           }
           // Rolling backwards (e.g. slid back down a hill) and pressing gas: brakes help stop it.
           if (vf < -REVERSE_ENTER) holdBack = P.brakeTorque * 0.5 * thr;
+          // Wheelie control: the rear brake drops a nose that is going over backwards.
+          if (w === this.wheels[0] && this._flipBrake > 0) brake += P.brakeTorque * FLIP_BRAKE * this._flipBrake;
         } else if (thr < -0.02) {
           if (this._reverse) {
             // Reverse motor, while the brakes keep holding against rolling forward — so holding
@@ -1018,7 +1070,7 @@
           c.rt = rx * ty - ry * tx;
           c.mn = 1 / (im + iI * c.rn * c.rn);
           c.mt = 1 / (im + iI * c.rt * c.rt);
-          c.mu = (c.head ? HEAD_FRICTION : HULL_FRICTION) * sf * fm;
+          c.mu = (c.head ? HEAD_FRICTION : c.tail ? TAIL_FRICTION : HULL_FRICTION) * sf * fm;
           if (ratio > 0 && (c.ln !== 0 || c.lt !== 0)) {
             c.ln *= ratio; c.lt *= ratio;
             const ix = nx * c.ln + tx * c.lt, iy = ny * c.ln + ty * c.lt;
@@ -1028,6 +1080,60 @@
           c.target = this._contactTarget(c, h, BODY_RESTITUTION + sb);
         }
       }
+    }
+
+    // Wheelie / launch limiter (see the constants): multiplier 0..1 on the forward drive torque this sub-step.
+    // Uses the previous sub-step's contact state (rear-wheel normal, front-wheel load, tail contact).
+    _driveScale(ctl, E, thr) {
+      const P = this._P;
+      const wr = this.wheels[0], wf = this.wheels[1];
+      this.driveLimit = 0;
+      const nx = wr.nx, ny = wr.ny;
+      if (!wr.grounded || !(ny > 0.2)) return 1;       // only a rear wheel on the ground can lever the chassis
+      const tx = ny, ty = -nx;
+      const rel = U.wrapAngle(this.angle - Math.atan2(ty, tx)); // pitch relative to the ground under the rear wheel
+      let scale = 1;
+      // 1. tail stand
+      if (rel > TAIL_FADE_LO && (this._tailContact || this._frontAirT > TAIL_FRONT_AIR)) {
+        scale *= 1 - U.smoothstep(TAIL_FADE_LO, TAIL_FADE_HI, rel);
+      }
+      // 2. launch control (not while the driver holds W: deliberate wheelies and gas launches keep full torque)
+      let gate = ctl.lean > 0 ? 1 - ctl.lean : 1;
+      if (gate > 0) {
+        const ref = (P.mass * P.share[1] + wf._p.m) * E.g;
+        const frac = wf.grounded && ref > 0 ? wf.load / ref : 0;
+        gate *= 1 - U.smoothstep(LAUNCH_LOAD_LO, LAUNCH_LOAD_HI, frac);
+      }
+      if (gate > 0) {
+        // centre of mass relative to the rear contact: d ahead of it along the ground, hh above it
+        const cx = this.x - (wr.x - nx * wr.radius), cy = this.y - (wr.y - ny * wr.radius);
+        let d = cx * tx + cy * ty, hh = cx * nx + cy * ny;
+        const dl = clamp(this.av * PITCH_LOOKAHEAD, 0, 0.6);  // where the pitch is heading
+        if (dl > 0) {
+          const c = Math.cos(dl), s = Math.sin(dl);
+          const d2 = d * c - hh * s;
+          hh = d * s + hh * c; d = d2;
+        }
+        let restore = P.totalMass * E.g * ny * d;
+        if (ctl.lean < 0) {
+          const fade = Math.max(U.smoothstep(LEAN_FADE_LO, LEAN_FADE_HI, Math.abs(this._vf())), Math.abs(thr) * 0.7);
+          restore += P.groundLeanTorque * -ctl.lean * E.sensitivity * fade;
+        }
+        const fMax = LAUNCH_MARGIN * Math.max(0, restore) / Math.max(0.2, hh);
+        // Heading past the balance point (centre of mass behind the rear contact): brake the rear wheel too.
+        if (d < 0) this._flipBrake = gate * U.smoothstep(0, FLIP_BRAKE_ANGLE, Math.atan2(-d, Math.max(0.05, hh)));
+        let fReq = 0;
+        for (const w of this.wheels) {
+          if (w._p.drive <= 0) continue;
+          fReq += P.torque * torqueCurve(-(w.omega - this.av) / P.maxOmega) * thr * w._p.drive / w.radius;
+        }
+        if (fReq > fMax) scale *= 1 - gate * (1 - fMax / fReq);
+        // Past ~46° the cap alone would hold a steady D-only wheelie at the balance torque; fade the drive
+        // out towards the tail-stand band so the nose comes down instead (W wheelies are not gated).
+        scale *= 1 - gate * U.smoothstep(HIGH_WHEELIE_LO, TAIL_FADE_LO, rel);
+      }
+      this.driveLimit = 1 - scale;
+      return scale;
     }
 
     // Minimum allowed normal velocity: speculative (may close the gap this step) or restitution
@@ -1296,9 +1402,15 @@
       }
       // chassis points
       const pts = this._hullC;
+      let tail = false;
       for (let i = 0; i < pts.length; i++) {
-        if (this._touchingChassis(pts[i]) || this._touchingChassis(this._hullCeil[i])) body = true;
+        const g = this._touchingChassis(pts[i]);
+        if (g && pts[i].tail) tail = true;
+        if (g || this._touchingChassis(this._hullCeil[i])) body = true;
       }
+      this._tailContact = tail;
+      const wr = this.wheels[0], wf = this.wheels[1];
+      this._frontAirT = wr.grounded && !wf.grounded ? this._frontAirT + h : 0;
       const headTouch = this._touchingChassis(this._headC) || this._touchingChassis(this._headCeil);
       if (headTouch) { body = true; this.headHit = true; }
       for (let i = 0; i < this._nAct; i++) {
@@ -1377,6 +1489,7 @@
       this._deactivate(this._headC); this._deactivate(this._headCeil);
       this._nAct = 0;
       this._hPrev = 0;
+      this._tailContact = false; this._frontAirT = 0; this._flipBrake = 0; this.driveLimit = 0;
     }
 
     _snapshot() {
