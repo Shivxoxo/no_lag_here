@@ -81,6 +81,32 @@ Libraries (GSAP, ScrollTrigger, ScrollToPlugin, Three.js) are installed with npm
 
 ## 3. Install dependencies
 
+### Ubuntu / Debian quickstart
+
+```bash
+# 1. Node.js 22 (skip if `node -v` already says v20+)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs git
+
+# 2. Build tools — only needed if npm has to compile better-sqlite3/sharp (prebuilt binaries usually download fine)
+sudo apt-get install -y build-essential python3
+
+# 3. Get the code and install
+git clone https://github.com/shivxoxo/no_lag_here.git
+cd no_lag_here
+git checkout claude/beautiful-mendel-5ayce9
+npm install
+
+# 4. Configure + run
+cp .env.example .env
+nano .env                 # set ADMIN_PASSWORD=something-long (8+ chars), save with Ctrl+O, Enter, Ctrl+X
+npm start                 # → http://localhost:3000   admin → http://localhost:3000/admin
+```
+
+Open it on your phone on the same Wi-Fi with `http://<your-pc-ip>:3000` (find the IP with `hostname -I`). To share it on the internet without deploying, run `npx localtunnel --port 3000` in a second terminal or use ngrok.
+
+### Any OS
+
 Requirements: **Node.js 20+** (22 recommended) and npm.
 
 ```bash
