@@ -13,6 +13,7 @@ import { fx } from './core/particles.js';
 import { toast, cine, el, blocks } from './core/ui.js';
 import { runIntro } from './core/intro.js';
 import { buildHud } from './core/hud.js';
+import { initExtras } from './core/extras.js';
 
 import hero from './sections/hero.js';
 import archives from './sections/archives.js';
@@ -76,6 +77,7 @@ async function boot() {
     }
   }
   motion.reveal(document.getElementById('app'));
+  try { initExtras(); } catch (e) { console.error('[extras]', e); }
 
   // Section view tracking (analytics + HUD active state)
   const io = new IntersectionObserver((entries) => {
