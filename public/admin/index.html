@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="dark">
+  <title>SIR ARCHIVES — Admin</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2312161f'/%3E%3Cpath d='M4 4h8v2H6v1h6v5H4v-2h6V9H4z' fill='%235ab0ff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- ── Login ─────────────────────────────────────────────── -->
+  <section id="login" class="login" hidden aria-labelledby="login-title">
+    <form id="login-form" class="login-card" novalidate>
+      <div class="brand brand--lg">
+        <span class="brand-mark" aria-hidden="true">SA</span>
+        <span class="brand-text"><strong>SIR ARCHIVES</strong><small>Admin console</small></span>
+      </div>
+      <h1 id="login-title" class="login-title">Sign in</h1>
+      <p class="login-hint">Enter the admin password from <code>.env</code> (<code>ADMIN_PASSWORD</code>).</p>
+      <label class="field">
+        <span class="field-label">Password</span>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required autofocus>
+      </label>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <div class="login-actions">
+        <button id="login-submit" type="submit" class="btn btn--primary">Sign in</button>
+        <a class="btn btn--ghost" href="/">Back to site</a>
+      </div>
+    </form>
+  </section>
+
+  <!-- ── App shell ────────────────────────────────────────── -->
+  <div id="app" class="app" hidden>
+    <aside class="sidebar" aria-label="Admin navigation">
+      <div class="sidebar-head">
+        <a class="brand" href="#overview">
+          <span class="brand-mark" aria-hidden="true">SA</span>
+          <span class="brand-text"><strong>SIR ARCHIVES</strong><small>Admin</small></span>
+        </a>
+        <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-list" aria-label="Toggle navigation">
+          <span aria-hidden="true">☰</span>
+        </button>
+      </div>
+      <nav>
+        <ul id="nav-list" class="nav" role="tablist" aria-orientation="vertical"></ul>
+      </nav>
+      <div class="sidebar-foot">
+        <a class="btn btn--ghost btn--sm" href="/" target="_blank" rel="noopener">↗ Open site</a>
+        <button id="logout" type="button" class="btn btn--ghost btn--sm">Logout</button>
+      </div>
+    </aside>
+
+    <main id="main" class="main" tabindex="-1">
+      <header class="topbar">
+        <h1 id="page-title" class="page-title">Overview</h1>
+        <div id="page-actions" class="page-actions"></div>
+      </header>
+      <div id="view" class="view" role="tabpanel" aria-live="polite"></div>
+    </main>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Confirm dialog -->
+  <dialog id="confirm" class="dialog">
+    <form method="dialog" class="dialog-form">
+      <h2 id="confirm-title" class="dialog-title">Are you sure?</h2>
+      <p id="confirm-body" class="dialog-body"></p>
+      <div class="dialog-actions">
+        <button type="button" value="cancel" class="btn btn--ghost" data-act="cancel">Cancel</button>
+        <button type="button" value="ok" class="btn btn--danger" data-act="ok">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/admin/admin.js"></script>
+</body>
+</html>
