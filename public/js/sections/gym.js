@@ -31,7 +31,7 @@ const LOAD_STEPS = [
 function scene(esc, nick) {
   // viewBox 1200×520 — wall on top, rubber floor from y=380
   return `
-  <svg class="gym-svg" viewBox="0 0 1200 520" role="img" aria-label="A late-night gym: dumbbell rack, a treadmill with a very slow runner, a wall clock at 11:47 PM, a flickering neon sign, a water bottle and a mirror with a selfie flash." preserveAspectRatio="xMidYMid meet">
+  <svg class="gym-svg" viewBox="0 0 1200 470" role="img" aria-label="A late-night gym: dumbbell rack, a treadmill with a very slow runner, a wall clock at 11:47 PM, a flickering neon sign, a water bottle and a mirror with a selfie flash." preserveAspectRatio="xMidYMid meet">
     <defs>
       <linearGradient id="gym-wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c120b"/><stop offset="1" stop-color="#120c08"/></linearGradient>
       <linearGradient id="gym-floor" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a1410"/><stop offset="1" stop-color="#0d0a08"/></linearGradient>
@@ -47,21 +47,33 @@ function scene(esc, nick) {
     <!-- wall + floor -->
     <rect x="0" y="0" width="1200" height="380" fill="url(#gym-wall)"/>
     <rect x="0" y="0" width="1200" height="380" fill="url(#gym-lamp)"/>
-    <rect x="0" y="380" width="1200" height="140" fill="url(#gym-floor)"/>
-    <rect x="0" y="380" width="1200" height="140" fill="url(#gym-rubber)"/>
+    <rect x="0" y="380" width="1200" height="90" fill="url(#gym-floor)"/>
+    <rect x="0" y="380" width="1200" height="90" fill="url(#gym-rubber)"/>
     <line x1="0" y1="380" x2="1200" y2="380" stroke="rgba(255,138,61,.25)" stroke-width="2"/>
     <line x1="0" y1="440" x2="1200" y2="440" stroke="rgba(255,255,255,.04)"/>
-    <text x="24" y="508" class="gym-svg-mono" fill="rgba(255,255,255,.22)">FIG. 1 — TYPICAL 23:59 ARRIVAL · NOBODY ELSE IS HERE</text>
+    <text x="24" y="456" class="gym-svg-mono" fill="rgba(255,255,255,.22)">FIG. 1 — TYPICAL 23:59 ARRIVAL · NOBODY ELSE IS HERE</text>
+
+    <!-- floor props -->
+    <g class="gym-piece"><g transform="translate(380,398)">
+      <rect x="0" y="0" width="120" height="26" rx="13" fill="#5a3a8a" stroke="#7b55b5" stroke-width="2"/>
+      <circle cx="13" cy="13" r="8" fill="#2a1a45"/><circle cx="13" cy="13" r="3.5" fill="#5a3a8a"/>
+      <text x="60" y="44" text-anchor="middle" class="gym-svg-mono gym-svg-tiny" fill="rgba(255,255,255,.28)">MAT · NEVER UNROLLED</text>
+    </g></g>
+    <g class="gym-piece"><g transform="translate(1150,410)">
+      <path d="M-14 -6 A14 14 0 0 1 14 -6" fill="none" stroke="#6b6b74" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="0" cy="8" r="16" fill="#2b2b31" stroke="#5a5a64" stroke-width="2"/>
+      <text x="0" y="12" text-anchor="middle" class="gym-svg-mono gym-svg-tiny" fill="#ff8a3d">16</text>
+    </g></g>
 
     <!-- neon sign -->
-    <g class="gym-neon" transform="translate(70,48)">
+    <g class="gym-piece"><g class="gym-neon" transform="translate(70,48)">
       <rect x="0" y="0" width="420" height="120" rx="14" fill="none" stroke="#ff8a3d" stroke-width="3" filter="url(#gym-neon)"/>
       <text x="210" y="50" text-anchor="middle" class="gym-svg-neon gym-svg-neon-1" filter="url(#gym-neon)">OPEN 24/7</text>
       <text x="210" y="98" text-anchor="middle" class="gym-svg-neon gym-svg-neon-2" filter="url(#gym-neon)">${esc(nick)} ARRIVES AT 23:59</text>
-    </g>
+    </g></g>
 
     <!-- wall clock: 11:47 PM -->
-    <g transform="translate(760,120)">
+    <g class="gym-piece"><g transform="translate(640,118)">
       <circle r="62" fill="#0d0a08" stroke="#55453a" stroke-width="6"/>
       <circle r="54" fill="none" stroke="rgba(255,255,255,.08)"/>
       ${Array.from({ length: 12 }, (_, i) => `<line x1="0" y1="-50" x2="0" y2="${i % 3 === 0 ? -42 : -46}" stroke="${i % 3 === 0 ? '#ffe8c2' : '#8a7a6a'}" stroke-width="${i % 3 === 0 ? 3 : 2}" transform="rotate(${i * 30})"/>`).join('')}
@@ -69,11 +81,11 @@ function scene(esc, nick) {
       <line class="gym-hand-m" x1="0" y1="6" x2="0" y2="-44" stroke="#ffe8c2" stroke-width="3.5" stroke-linecap="round" transform="rotate(282)"/>
       <g class="gym-hand-s"><line x1="0" y1="10" x2="0" y2="-48" stroke="#ff8a3d" stroke-width="1.6" stroke-linecap="round"/></g>
       <circle r="4" fill="#ff8a3d"/>
-      <text x="0" y="96" text-anchor="middle" class="gym-svg-mono" fill="#ff8a3d">23:47 · STILL NOT HERE</text>
-    </g>
+      <text x="0" y="96" text-anchor="middle" class="gym-svg-mono" fill="#ff8a3d">23:47 · NOT HERE</text>
+    </g></g>
 
     <!-- dumbbell rack -->
-    <g transform="translate(70,240)">
+    <g class="gym-piece"><g transform="translate(70,240)">
       <rect x="0" y="0" width="24" height="140" fill="url(#gym-metal)"/>
       <rect x="326" y="0" width="24" height="140" fill="url(#gym-metal)"/>
       <rect x="0" y="52" width="350" height="12" rx="3" fill="#3a3a42"/>
@@ -81,10 +93,10 @@ function scene(esc, nick) {
       ${[0, 1, 2].map(i => `<g class="gym-db" transform="translate(${52 + i * 100},42)"><rect x="0" y="0" width="70" height="8" rx="4" fill="#8a8a94"/><rect x="-20" y="-12" width="22" height="32" rx="4" fill="#2a2a30" stroke="#5a5a64"/><rect x="68" y="-12" width="22" height="32" rx="4" fill="#2a2a30" stroke="#5a5a64"/></g>`).join('')}
       ${[0, 1, 2].map(i => `<g class="gym-db" transform="translate(${52 + i * 100},110)"><rect x="0" y="0" width="70" height="10" rx="5" fill="#8a8a94"/><rect x="-24" y="-16" width="26" height="42" rx="5" fill="#2a2a30" stroke="#5a5a64"/><rect x="68" y="-16" width="26" height="42" rx="5" fill="#2a2a30" stroke="#5a5a64"/></g>`).join('')}
       <text x="175" y="160" text-anchor="middle" class="gym-svg-mono" fill="rgba(255,255,255,.28)">DUST LEVEL: HISTORIC</text>
-    </g>
+    </g></g>
 
     <!-- treadmill -->
-    <g transform="translate(560,240)">
+    <g class="gym-piece"><g transform="translate(560,240)">
       <rect x="230" y="-30" width="14" height="150" rx="4" fill="url(#gym-metal)"/>
       <rect x="196" y="-52" width="80" height="34" rx="8" fill="#0a0806" stroke="#55453a" stroke-width="3"/>
       <text x="236" y="-30" text-anchor="middle" class="gym-svg-mono gym-svg-tiny" fill="#ff8a3d">0.1 km/h</text>
@@ -96,38 +108,38 @@ function scene(esc, nick) {
         <g class="gym-runner-body">
           <circle cx="0" cy="-92" r="12" fill="#ffe8c2"/>
           <line x1="0" y1="-80" x2="0" y2="-40" stroke="#ff8a3d" stroke-width="8" stroke-linecap="round"/>
-          <g class="gym-arm gym-arm-l" transform="translate(0,-74)"><line x1="0" y1="0" x2="-4" y2="30" stroke="#ffe8c2" stroke-width="6" stroke-linecap="round"/></g>
-          <g class="gym-arm gym-arm-r" transform="translate(0,-74)"><line x1="0" y1="0" x2="4" y2="30" stroke="#ffe8c2" stroke-width="6" stroke-linecap="round"/></g>
-          <g class="gym-leg gym-leg-l" transform="translate(0,-40)"><line x1="0" y1="0" x2="-6" y2="40" stroke="#c9c9d6" stroke-width="7" stroke-linecap="round"/></g>
-          <g class="gym-leg gym-leg-r" transform="translate(0,-40)"><line x1="0" y1="0" x2="6" y2="40" stroke="#c9c9d6" stroke-width="7" stroke-linecap="round"/></g>
+          <g transform="translate(0,-74)"><g class="gym-arm gym-arm-l"><line x1="0" y1="0" x2="-4" y2="30" stroke="#ffe8c2" stroke-width="6" stroke-linecap="round"/></g></g>
+          <g transform="translate(0,-74)"><g class="gym-arm gym-arm-r"><line x1="0" y1="0" x2="4" y2="30" stroke="#ffe8c2" stroke-width="6" stroke-linecap="round"/></g></g>
+          <g transform="translate(0,-40)"><g class="gym-leg gym-leg-l"><line x1="0" y1="0" x2="-6" y2="40" stroke="#c9c9d6" stroke-width="7" stroke-linecap="round"/></g></g>
+          <g transform="translate(0,-40)"><g class="gym-leg gym-leg-r"><line x1="0" y1="0" x2="6" y2="40" stroke="#c9c9d6" stroke-width="7" stroke-linecap="round"/></g></g>
         </g>
         <g class="gym-phone" transform="translate(-30,-60)"><rect x="0" y="0" width="12" height="20" rx="2" fill="#0a0806" stroke="#ffe8c2" stroke-width="1.5"/><rect x="2" y="3" width="8" height="12" fill="rgba(56,232,255,.65)"/></g>
       </g>
       <text x="125" y="172" text-anchor="middle" class="gym-svg-mono" fill="rgba(255,255,255,.28)">PACE: SLOWER THAN HIS REPLIES</text>
-    </g>
+    </g></g>
 
     <!-- water bottle -->
-    <g transform="translate(880,330)">
+    <g class="gym-piece"><g transform="translate(880,330)">
       <rect x="0" y="0" width="22" height="48" rx="6" fill="rgba(56,232,255,.28)" stroke="rgba(56,232,255,.75)" stroke-width="2"/>
       <rect x="3" y="26" width="16" height="20" rx="3" fill="rgba(56,232,255,.6)"/>
       <rect x="4" y="-9" width="14" height="10" rx="2" fill="#ff8a3d"/>
       <text x="11" y="66" text-anchor="middle" class="gym-svg-mono gym-svg-tiny" fill="rgba(255,255,255,.3)">UNOPENED</text>
-    </g>
+    </g></g>
 
     <!-- mirror with the selfie -->
-    <g transform="translate(990,60)">
+    <g class="gym-piece"><g transform="translate(990,60)">
       <rect x="0" y="0" width="160" height="290" rx="12" fill="url(#gym-mirror)" stroke="#5a4a3c" stroke-width="4"/>
       <line x1="20" y1="270" x2="140" y2="20" stroke="rgba(255,255,255,.07)" stroke-width="18"/>
       <line x1="50" y1="280" x2="150" y2="60" stroke="rgba(255,255,255,.04)" stroke-width="8"/>
       <g class="gym-selfie" transform="translate(80,150)">
-        <circle cx="0" cy="-58" r="18" fill="#2a1e14"/>
-        <path d="M-34 60 Q-34 -22 0 -26 Q34 -22 34 60 Z" fill="#2a1e14"/>
+        <circle cx="0" cy="-58" r="18" fill="#352618"/>
+        <path d="M-34 60 Q-34 -22 0 -26 Q34 -22 34 60 Z" fill="#352618"/>
         <rect x="-40" y="-52" width="18" height="30" rx="3" fill="#0a0806" stroke="#ffe8c2" stroke-width="1.5"/>
         <circle class="gym-flash" cx="-31" cy="-46" r="6" fill="#fff"/>
       </g>
       <rect class="gym-flash-wash" x="0" y="0" width="160" height="290" rx="12" fill="#fff"/>
       <text x="80" y="318" text-anchor="middle" class="gym-svg-mono" fill="rgba(255,255,255,.28)">SETS: 0 · SELFIES: 14</text>
-    </g>
+    </g></g>
   </svg>`;
 }
 
@@ -150,7 +162,8 @@ export default {
         </header>
 
         <figure class="gym-scene glass" data-reveal>
-          ${scene(esc, nick)}
+          <div class="gym-scene-scroller">${scene(esc, nick)}</div>
+          <span class="gym-pan-hint mono" aria-hidden="true">◂ drag to pan cam 03 ▸</span>
           <figcaption class="gym-scene-cap mono"><span class="tag tag-red"><span class="dot"></span> LIVE</span> CAM 03 · MEMBERS PRESENT: <b>0</b> · MEMBERS "ON THE WAY": <b>1</b></figcaption>
         </figure>
 
@@ -231,24 +244,26 @@ export default {
     const q = (s) => el.querySelector(s);
 
     // ── Stats: animate on section enter ───────────────────────
-    let consistencyTimer = 0;
+    const cons = q('.gym-consistency'), consFill = q('.gym-fill-consistency');
+    const glyphs = ['???', '??', '4', '0.5', 'NaN', '99', '-3', '12', 'idk', '∞', '0', '7', '3.14', '1', '404'];
+    let consistencyTimer = 0, statsStarted = false;
+    const consTick = () => { cons.textContent = pick(glyphs); consFill.style.width = randInt(3, 60) + '%'; };
+    const startCons = () => { if (motion.reduced || consistencyTimer) return; consTick(); consistencyTimer = setInterval(consTick, 1000); };
+    const stopCons = () => { clearInterval(consistencyTimer); consistencyTimer = 0; };
     ctx.onSectionEnter(el, () => {
+      statsStarted = true;
       motion.countUp(q('.gym-motivation'), 87, { duration: 1.6 });
       q('.gym-fill-motivation').style.width = '87%';
       q('.gym-fill-late').style.width = '100%';
       q('.gym-fill-excuses').style.width = '100%';
-      const cons = q('.gym-consistency'), consFill = q('.gym-fill-consistency');
-      const glyphs = ['???', '??', '4', '0.5', 'NaN', '99', '-3', '12', 'idk', '∞', '0', '7', '3.14', '??', '1'];
-      if (motion.reduced) { cons.textContent = '???'; consFill.style.width = '13%'; return; }
-      const tick = () => { cons.textContent = pick(glyphs); consFill.style.width = randInt(3, 60) + '%'; };
-      tick();
-      consistencyTimer = setInterval(tick, 1000);
+      if (motion.reduced) { cons.textContent = '???'; consFill.style.width = '13%'; } else startCons();
     });
-    motion.onVisible(el, (vis) => { if (!vis && consistencyTimer) { clearInterval(consistencyTimer); consistencyTimer = 0; } else if (vis && !consistencyTimer && !motion.reduced && q('.gym-consistency').textContent !== '???') { consistencyTimer = setInterval(() => { q('.gym-consistency').textContent = pick(['???', '4', '0.5', 'NaN', '99', '-3', '12', 'idk', '∞', '0', '7']); q('.gym-fill-consistency').style.width = randInt(3, 60) + '%'; }, 1000); } });
+    // only tick while on screen (no timers burning in the background)
+    motion.onVisible(el, (vis) => { if (!statsStarted) return; if (vis) startCons(); else stopCons(); });
 
     // Scene entrance: pieces of the gym drop in when the section is reached
     if (!motion.reduced) {
-      const parts = el.querySelectorAll('.gym-svg > g');
+      const parts = el.querySelectorAll('.gym-piece');
       gsap.set(parts, { opacity: 0, y: 24 });
       ctx.onSectionEnter(el, () => { gsap.to(parts, { opacity: 1, y: 0, duration: 0.9, stagger: 0.12, ease: 'power3.out' }); });
     }

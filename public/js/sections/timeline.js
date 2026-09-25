@@ -129,7 +129,8 @@ export default {
     navBtns.forEach(b => b.addEventListener('click', () => {
       const target = cards[Number(b.dataset.target)]; if (!target) return;
       sfx.play('whoosh');
-      motion.scrollTo(target, { offset: -(56 + 40) });
+      // native smooth scroll (html has scroll-behavior: smooth); .tl-entry carries scroll-margin-top for the HUD
+      target.scrollIntoView({ block: 'start', behavior: motion.reduced ? 'auto' : 'smooth' });
     }));
 
     // ── Easter egg: the tiny star ─────────────────────────────

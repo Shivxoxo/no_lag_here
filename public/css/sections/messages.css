@@ -1,1 +1,64 @@
-/* messages — section styles (scoped under .sec-messages) */
+/* 19 · MESSAGES — intercepted-comms console (teal) */
+.sec-messages { --accent: var(--cyan); --accent-rgb: 56, 232, 255; background: linear-gradient(180deg, #04090b 0%, #061417 55%, #040a0c 100%); }
+.sec-messages .msg-grid-bg { position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(0deg, rgba(56,232,255,.045) 0 1px, transparent 1px 7px), linear-gradient(90deg, rgba(56,232,255,.06) 1px, transparent 1px);
+  background-size: 100% 7px, 96px 100%; mask-image: linear-gradient(180deg, rgba(0,0,0,.9), rgba(0,0,0,.35) 40%, rgba(0,0,0,.7)); -webkit-mask-image: linear-gradient(180deg, rgba(0,0,0,.9), rgba(0,0,0,.35) 40%, rgba(0,0,0,.7)); }
+.sec-messages .msg-grid-bg::after { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse at 80% 0%, rgba(56,232,255,.12), transparent 50%); }
+.sec-messages .msg-wrap { z-index: 1; }
+.sec-messages .msg-title { color: #fff; }
+.sec-messages .msg-wave-box { margin-top: 18px; border: 1px solid rgba(56,232,255,.22); border-radius: var(--radius-sm); background: rgba(0,0,0,.45); overflow: hidden; }
+.sec-messages .msg-wave { width: 100%; height: clamp(60px, 9vw, 110px); }
+.sec-messages .msg-wave-line { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-linejoin: round; filter: drop-shadow(0 0 6px rgba(56,232,255,.7)); }
+.sec-messages .msg-wave-line-2 { stroke: rgba(56,232,255,.35); stroke-width: 1; filter: none; }
+.sec-messages .msg-meta { display: flex; flex-wrap: wrap; gap: 6px 22px; padding: 10px 14px; border-top: 1px solid rgba(56,232,255,.15); font-size: var(--fs-tiny); letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2); }
+.sec-messages .msg-meta b { color: var(--muted); font-weight: 500; }
+.sec-messages .msg-status { color: var(--cyan); display: inline-flex; align-items: center; gap: 6px; }
+.sec-messages .msg-status .dot { width: 6px; height: 6px; animation: pulse 1.4s infinite; }
+.sec-messages .msg-disabled { margin-top: 10px; }
+
+.sec-messages .msg-layout { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: clamp(18px, 3vw, 40px); align-items: start; }
+.sec-messages .msg-form { position: sticky; top: calc(var(--hud-h) + 16px); display: flex; flex-direction: column; gap: 16px; border-color: rgba(56,232,255,.18); }
+.sec-messages .msg-form-head { display: flex; align-items: center; gap: 10px; font-size: var(--fs-tiny); letter-spacing: .28em; color: var(--cyan); }
+.sec-messages .msg-form-head .dot { color: var(--red); width: 7px; height: 7px; }
+.sec-messages .msg-field { display: flex; flex-direction: column; gap: 8px; }
+.sec-messages .msg-field > span { display: flex; justify-content: space-between; align-items: center; font-size: var(--fs-tiny); letter-spacing: .24em; text-transform: uppercase; color: var(--muted); }
+.sec-messages .msg-counter { color: var(--fg-2); letter-spacing: .06em; }
+.sec-messages .msg-counter.is-hot { color: var(--gold); }
+.sec-messages input, .sec-messages textarea { width: 100%; min-height: 46px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--line-2); background: rgba(0,0,0,.5); color: var(--fg); font-family: var(--font-mono); font-size: .95rem; transition: border-color .2s, box-shadow .2s; }
+.sec-messages textarea { resize: vertical; min-height: 130px; line-height: 1.55; }
+.sec-messages input:focus, .sec-messages textarea:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(56,232,255,.15), 0 0 30px rgba(56,232,255,.12); }
+.sec-messages input::placeholder, .sec-messages textarea::placeholder { color: rgba(255,255,255,.28); }
+.sec-messages .msg-error { padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,59,59,.5); background: rgba(255,59,59,.08); color: #ff8080; font-size: var(--fs-small); }
+.sec-messages .msg-notice { padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(46,229,107,.4); background: rgba(46,229,107,.07); color: var(--pitch); font-size: var(--fs-small); }
+.sec-messages .msg-form-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sec-messages .msg-rules { font-size: var(--fs-tiny); letter-spacing: .14em; text-transform: uppercase; }
+.sec-messages .msg-send.is-sending .msg-send-label::after { content: '…'; animation: blink 1s steps(2, start) infinite; }
+
+.sec-messages .msg-wall { min-height: 320px; display: flex; flex-direction: column; gap: 14px; }
+.sec-messages .msg-wall-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(56,232,255,.18); font-size: var(--fs-tiny); letter-spacing: .24em; text-transform: uppercase; color: var(--muted); }
+.sec-messages .msg-wall-title b { color: var(--cyan); }
+.sec-messages .msg-rec { color: var(--red); animation: pulse 1.6s infinite; }
+.sec-messages .msg-list { display: flex; flex-direction: column; gap: 12px; }
+.sec-messages .msg-card { position: relative; display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 14px; padding: 16px 18px 16px 16px; border-radius: 12px; border: 1px solid rgba(56,232,255,.14); border-left: 3px solid rgba(56,232,255,.55); background: linear-gradient(90deg, rgba(56,232,255,.06), rgba(0,0,0,.35) 40%); transition: border-color .3s, box-shadow .3s; }
+.sec-messages .msg-card::before { content: ''; position: absolute; right: 14px; top: 12px; width: 26px; height: 8px; background: repeating-linear-gradient(90deg, rgba(56,232,255,.5) 0 2px, transparent 2px 4px); opacity: .5; }
+.sec-messages .msg-card.is-newest { border-left-color: var(--cyan); }
+.sec-messages .msg-card.is-glow { border-color: rgba(56,232,255,.55); box-shadow: 0 0 40px rgba(56,232,255,.25), inset 0 0 30px rgba(56,232,255,.06); }
+.sec-messages .msg-avatar { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; font-family: var(--font-display); font-size: 1.5rem; color: #04090b; background: linear-gradient(160deg, var(--cyan), #1a9bb0); box-shadow: 0 0 18px rgba(56,232,255,.35); }
+.sec-messages .msg-body { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.sec-messages .msg-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: var(--fs-tiny); letter-spacing: .14em; text-transform: uppercase; }
+.sec-messages .msg-from { color: var(--cyan); font-weight: 600; letter-spacing: .1em; overflow-wrap: anywhere; }
+.sec-messages .msg-card-head time { color: var(--muted); }
+.sec-messages .msg-content { color: var(--fg); font-size: clamp(.98rem, 1.15vw, 1.08rem); line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sec-messages .msg-cursor::after { content: '▌'; color: var(--cyan); margin-left: 2px; animation: blink 1s steps(2, start) infinite; }
+.sec-messages .msg-empty, .sec-messages .msg-loading { padding: 40px 16px; text-align: center; color: var(--muted); font-size: var(--fs-small); letter-spacing: .08em; border: 1px dashed rgba(56,232,255,.2); border-radius: 12px; }
+.sec-messages .msg-more-wrap { display: flex; justify-content: center; padding-top: 6px; }
+.sec-messages .msg-more[hidden] { display: none !important; }
+@media (max-width: 900px) {
+  .sec-messages .msg-layout { grid-template-columns: 1fr; }
+  .sec-messages .msg-form { position: static; }
+}
+@media (max-width: 640px) {
+  .sec-messages .msg-card { grid-template-columns: 38px 1fr; gap: 12px; padding: 14px; }
+  .sec-messages .msg-avatar { width: 38px; height: 38px; font-size: 1.25rem; }
+  .sec-messages .msg-meta { gap: 4px 14px; }
+}

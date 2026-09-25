@@ -150,12 +150,12 @@ export default {
 
     const drumroll = async (id) => {
       if (motion.reduced) return;
-      const ticks = 16;
+      const ticks = 12;
       for (let t = 0; t < ticks; t++) {
         if (id !== runId) return;
         sfx.play('tick');
         gsap.fromTo(env, { x: (t % 2 ? 1 : -1) * (1 + t * 0.35) }, { x: 0, duration: 0.09, ease: 'power2.out' });
-        await wait(170 - t * 7);
+        await wait(150 - t * 7);
       }
     };
 
@@ -216,7 +216,7 @@ export default {
           if (id !== runId) return;
           const speech = SPEECHES[i % SPEECHES.length];
           if (motion.reduced) speechEl.textContent = speech;
-          else await motion.typewriter(speechEl, speech, { speed: 18, jitter: 12 });
+          else await motion.typewriter(speechEl, speech, { speed: 12, jitter: 10 });
         }, 1.5);
       if (motion.reduced) tl.progress(1);
       await tl;

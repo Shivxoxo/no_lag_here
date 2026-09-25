@@ -1,1 +1,123 @@
-/* ai — section styles (scoped under .sec-ai) */
+/* 16 · SIR-AI ANALYSIS CORE — acid terminal on near-black */
+.sec-ai { --accent: var(--acid); --accent-rgb: 198, 255, 61; background: #030305; color: var(--fg); }
+.sec-ai::after { content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 0%, rgba(198,255,61,.09), transparent 55%), linear-gradient(180deg, transparent 60%, rgba(3,3,5,.9) 100%); }
+.sec-ai .ai-rain { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; opacity: .3; pointer-events: none;
+  mask-image: radial-gradient(ellipse at 50% 40%, #000 30%, transparent 85%); -webkit-mask-image: radial-gradient(ellipse at 50% 40%, #000 30%, transparent 85%); }
+.sec-ai .ai-scanlines { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: .35;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.35) 0 2px, transparent 2px 4px); }
+.sec-ai .ai-wrap { z-index: 1; }
+.sec-ai .ai-title { color: #fff; }
+.sec-ai .ai-title-acc { color: var(--acid); text-shadow: 0 0 30px rgba(198,255,61,.35); }
+
+/* layout */
+.sec-ai .ai-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, .85fr); gap: clamp(18px, 3vw, 40px); align-items: start; }
+
+/* console */
+.sec-ai .ai-console { position: relative; border: 1px solid rgba(198,255,61,.22); border-radius: var(--radius); background: rgba(3,3,5,.86); box-shadow: 0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.6), 0 0 50px rgba(198,255,61,.06); overflow: hidden; }
+.sec-ai .ai-console::before { content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit; box-shadow: inset 0 0 80px rgba(198,255,61,.05); }
+.sec-ai .ai-bar { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid rgba(198,255,61,.14); background: rgba(198,255,61,.04); font-size: var(--fs-tiny); letter-spacing: .08em; color: var(--muted); }
+.sec-ai .ai-dots { display: inline-flex; gap: 6px; }
+.sec-ai .ai-dots i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,.12); }
+.sec-ai .ai-dots i:nth-child(1) { background: #ff5f57; } .sec-ai .ai-dots i:nth-child(2) { background: #febc2e; } .sec-ai .ai-dots i:nth-child(3) { background: #28c840; }
+.sec-ai .ai-bar-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
+.sec-ai .ai-status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); letter-spacing: .2em; white-space: nowrap; }
+.sec-ai .ai-status .dot { width: 7px; height: 7px; }
+.sec-ai .ai-status.is-busy { color: var(--gold); } .sec-ai .ai-status.is-busy .dot { animation: ai-blink .5s steps(2, start) infinite; }
+.sec-ai .ai-status.is-done { color: var(--pitch); }
+@keyframes ai-blink { to { visibility: hidden; } }
+
+.sec-ai .ai-term { border: 0; border-radius: 0; background: transparent; padding: 18px 20px 12px; min-height: clamp(220px, 34vh, 340px); max-height: clamp(280px, 46vh, 460px); font-size: clamp(.78rem, 1.05vw, .92rem); scrollbar-width: thin; scrollbar-color: rgba(198,255,61,.3) transparent; }
+.sec-ai .ai-line { margin: 0 0 2px; }
+.sec-ai .ai-line.ai-hex { font-size: .82em; letter-spacing: .04em; opacity: .75; }
+.sec-ai .ai-hex-addr { color: rgba(198,255,61,.55); }
+.sec-ai .ai-hex-ascii { color: var(--fg-2); }
+.sec-ai .ai-pb { letter-spacing: 0; }
+.sec-ai .ai-pb-val { color: var(--fg-2); }
+.sec-ai .ai-cursor-line { display: flex; gap: 8px; align-items: center; color: var(--acid); margin-top: 4px; }
+.sec-ai .ai-prompt { color: rgba(198,255,61,.6); }
+.sec-ai .ai-line.ai-q { color: var(--fg); margin-top: 10px; }
+.sec-ai .ai-you { color: var(--cyan); }
+.sec-ai .ai-line.ai-a { color: #e8ffb0; }
+.sec-ai .ai-think { animation: ai-blink 1s steps(2, start) infinite; }
+
+/* verdict: giant percentage */
+.sec-ai .ai-verdict { padding: 8px 20px 0; border-top: 1px dashed rgba(198,255,61,.2); text-align: center; }
+.sec-ai .ai-verdict-label { display: block; font-size: var(--fs-tiny); letter-spacing: .32em; color: var(--muted); margin-top: 12px; }
+.sec-ai .ai-percent { font-size: clamp(3.6rem, 11vw, 8.5rem); line-height: 1; color: var(--acid); text-shadow: 0 0 40px rgba(198,255,61,.45), 0 0 120px rgba(198,255,61,.2); letter-spacing: .02em; }
+
+/* conclusion panel */
+.sec-ai .ai-conclusion { margin: 14px 20px 6px; padding: clamp(16px, 2.5vw, 26px) clamp(16px, 3vw, 30px); border: 2px solid var(--red); background: rgba(255,59,59,.08); border-radius: 8px; text-align: center; transform: rotate(-1.5deg); box-shadow: 0 0 40px rgba(255,59,59,.2), inset 0 0 30px rgba(255,59,59,.08); transform-origin: center; }
+.sec-ai .ai-conclusion-kicker { display: block; font-size: var(--fs-tiny); letter-spacing: .4em; color: var(--red); }
+.sec-ai .ai-conclusion-text { font-size: clamp(1.8rem, 4.2vw, 3.4rem); color: #fff; margin-top: 8px; line-height: .95; }
+.sec-ai .ai-conclusion-foot { display: block; margin-top: 10px; font-size: var(--fs-tiny); letter-spacing: .14em; color: var(--fg-2); }
+
+.sec-ai .ai-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 16px 20px; border-top: 1px solid rgba(198,255,61,.14); }
+.sec-ai .ai-meta { font-size: var(--fs-tiny); letter-spacing: .14em; }
+.sec-ai .ai-meta b { color: var(--fg-2); font-weight: 600; }
+
+/* ask box */
+.sec-ai .ai-ask { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 0 20px 14px; }
+.sec-ai .ai-ask-prefix { font-size: var(--fs-tiny); letter-spacing: .24em; color: var(--acid); white-space: nowrap; }
+.sec-ai .ai-ask-input { min-height: 42px; padding: 8px 14px; border-radius: 8px; border: 1px solid rgba(198,255,61,.25); background: rgba(198,255,61,.04); color: var(--fg); font-size: .9rem; outline: none; transition: border-color .2s, box-shadow .2s; min-width: 0; }
+.sec-ai .ai-ask-input::placeholder { color: var(--muted); }
+.sec-ai .ai-ask-input:focus { border-color: var(--acid); box-shadow: 0 0 0 3px rgba(198,255,61,.15); }
+.sec-ai .ai-ask-btn { min-height: 42px; border-color: rgba(198,255,61,.4); color: var(--acid); }
+.sec-ai .ai-disclaimer { padding: 0 20px 16px; font-size: var(--fs-tiny); letter-spacing: .08em; }
+
+/* side panel */
+.sec-ai .ai-side { display: grid; gap: 16px; }
+.sec-ai .ai-hud { position: relative; aspect-ratio: 1; width: min(100%, 300px); margin: 0 auto; display: grid; place-items: center; }
+.sec-ai .ai-rings { position: absolute; inset: 0; width: 100%; height: 100%; }
+.sec-ai .ai-ring { fill: none; stroke: var(--acid); stroke-width: 1.5; transform-origin: 100px 100px; transform-box: view-box; }
+.sec-ai .ai-ring-1 { stroke-dasharray: 40 18 6 18; opacity: .55; animation: ai-spin 18s linear infinite; }
+.sec-ai .ai-ring-2 { stroke-dasharray: 3 9; stroke-width: 3; opacity: .45; animation: ai-spin 11s linear infinite reverse; }
+.sec-ai .ai-ring-3 { stroke-dasharray: 90 30; opacity: .8; animation: ai-spin 7s linear infinite; }
+.sec-ai .ai-ring-static { fill: rgba(198,255,61,.04); stroke: rgba(198,255,61,.25); stroke-width: 1; }
+.sec-ai .ai-ring-tick { stroke: rgba(198,255,61,.5); stroke-width: 2; }
+.sec-ai.is-analysing .ai-ring-1 { animation-duration: 3s; opacity: .9; }
+.sec-ai.is-analysing .ai-ring-2 { animation-duration: 2s; opacity: .8; }
+.sec-ai.is-analysing .ai-ring-3 { animation-duration: 1.2s; stroke: #fff; }
+@keyframes ai-spin { to { transform: rotate(360deg); } }
+.sec-ai .ai-hud-center { position: relative; text-align: center; display: grid; gap: 2px; }
+.sec-ai .ai-hud-num { font-size: clamp(2.4rem, 4vw, 3.4rem); line-height: 1; color: #fff; }
+.sec-ai .ai-hud-label { font-size: var(--fs-tiny); letter-spacing: .3em; color: var(--acid); }
+
+.sec-ai .ai-netbox { border: 1px solid rgba(198,255,61,.18); border-radius: var(--radius-sm); background: rgba(3,3,5,.7); padding: 12px 12px 6px; }
+.sec-ai .ai-panel-title { display: flex; justify-content: space-between; font-size: var(--fs-tiny); letter-spacing: .24em; color: var(--muted); margin-bottom: 6px; }
+.sec-ai .ai-net-state { color: var(--acid); }
+.sec-ai.is-analysing .ai-net-state { color: var(--gold); animation: ai-blink .6s steps(2, start) infinite; }
+.sec-ai .ai-net-svg { width: 100%; height: auto; }
+.sec-ai .ai-edge { stroke: var(--acid); stroke-width: 1; stroke-dasharray: 6 6; opacity: .2; }
+.sec-ai .ai-node { fill: #1d2a0a; stroke: var(--acid); stroke-width: 1.5; }
+.sec-ai .ai-node-l2 { stroke: var(--red); }
+.sec-ai .ai-net-label { font-family: var(--font-mono); font-size: 9px; letter-spacing: .2em; fill: var(--muted); }
+
+.sec-ai .ai-readouts { display: grid; gap: 8px; margin: 0; padding: 14px 16px; border: 1px solid rgba(198,255,61,.18); border-radius: var(--radius-sm); background: rgba(3,3,5,.7); font-size: var(--fs-tiny); }
+.sec-ai .ai-readouts > div { display: flex; justify-content: space-between; gap: 12px; }
+.sec-ai .ai-readouts dt { color: var(--muted); letter-spacing: .2em; }
+.sec-ai .ai-readouts dd { margin: 0; color: var(--fg-2); text-align: right; }
+.sec-ai .ai-readouts dd.warn { color: var(--gold); } .sec-ai .ai-readouts dd.ok { color: var(--pitch); }
+
+/* reduced motion: no rain, no spin, static states */
+html.reduced .sec-ai .ai-rain, html.reduced .sec-ai .ai-scanlines { display: none; }
+html.reduced .sec-ai .ai-ring { animation: none; }
+html.reduced .sec-ai .ai-conclusion { transform: none; }
+
+@media (max-width: 1000px) {
+  .sec-ai .ai-grid { grid-template-columns: 1fr; }
+  .sec-ai .ai-side { grid-template-columns: 1fr 1fr; align-items: start; }
+  .sec-ai .ai-hud { grid-row: span 2; width: min(100%, 260px); }
+}
+@media (max-width: 640px) {
+  .sec-ai .ai-side { grid-template-columns: 1fr; }
+  .sec-ai .ai-hud { grid-row: auto; width: min(70vw, 240px); }
+  .sec-ai .ai-bar { gap: 10px; padding: 10px 12px; }
+  .sec-ai .ai-status-text { display: none; }
+  .sec-ai .ai-term { padding: 14px 14px 10px; }
+  .sec-ai .ai-ask { grid-template-columns: minmax(0, 1fr) auto; padding: 0 14px 12px; }
+  .sec-ai .ai-ask-prefix { grid-column: 1 / -1; }
+  .sec-ai .ai-actions, .sec-ai .ai-disclaimer { padding-left: 14px; padding-right: 14px; }
+  .sec-ai .ai-actions { flex-direction: column; align-items: stretch; text-align: center; }
+  .sec-ai .ai-conclusion { margin: 12px 12px 4px; }
+}

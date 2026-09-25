@@ -141,7 +141,7 @@ export default {
     async function hexDump(rows = 2) {
       const base = randInt(0x0040, 0xffc0) & 0xfff0;
       for (let r = 0; r < rows; r++) {
-        const bytes = Array.from({ length: 12 }, () => randInt(0, 255).toString(16).padStart(2, '0')).join(' ');
+        const bytes = Array.from({ length: el.clientWidth < 640 ? 7 : 12 }, () => randInt(0, 255).toString(16).padStart(2, '0')).join(' ');
         const word = pick(HEXWORDS).padEnd(11, '.').slice(0, 11);
         addLine(`<span class="ai-hex-addr">0x${(base + r * 16).toString(16).padStart(4, '0').toUpperCase()}</span>  ${bytes}  <span class="ai-hex-ascii">${esc(word)}</span>`, 'dim ai-hex');
         if (!motion.reduced) await wait(55);
