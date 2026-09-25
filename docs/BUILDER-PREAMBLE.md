@@ -1,0 +1,12 @@
+# Builder preamble (read first)
+
+You are building part of THE SIR ARCHIVES — an absurdly over-engineered, cinematic, interactive birthday-roast website for a 16-year-old friend nicknamed SIR (Shreaysh Shenal Munda, midfielder, misses perfect passes from Shiv/Alex/Jason, "unnational" because he wasn't selected for football nationals, plays Free Fire + BGMI, watches anime constantly, famously lazy, goes to the gym very late, comedic exam struggles, eats like hell — biryani above all). The friends (Shiv + Alex) made this to destroy him with love. Reaction we want: "WHAT THE HELL DID YOU MAKE?"
+
+Repo: `/home/user/no_lag_here` (Express + SQLite backend already done; frontend core done).
+
+1. Read `docs/SECTION-CONTRACT.md` completely. Then read `public/js/sections/hero.js`, `public/css/sections/hero.css`, `public/css/base.css`, `public/js/core/motion.js`, `public/js/core/ui.js`, `public/js/core/particles.js`, and (if you use 3D) `public/js/core/three-utils.js`. Skim `public/js/main.js` to see how sections are mounted.
+2. Replace the STUB files for your sections with real implementations. Only write your own section files (`public/js/sections/<id>.js`, `public/css/sections/<id>.css`). Never edit shared/core files or other sections. Don't run `npm install`. Don't commit.
+3. Quality bar: premium, cinematic, polished, funny, technically impressive. Big sections (each should feel like a full "scene" — generous whitespace, huge display typography, real interactions). Every section must have its OWN visual identity (backgrounds, shapes, layout rhythm) — the site must never feel like the same card repeated.
+4. Test in headless Chromium yourself on YOUR port (see contract §10): no console errors / pageerrors; take desktop (1280×800) and mobile (390×844) screenshots of your section INTO `/tmp/claude-0/-home-user-no-lag-here/07a0a584-8a62-5ce9-9325-8d68046f90dc/scratchpad/shots/` and actually look at them (Read tool) to check layout, clipping, overflow, and that text is readable. Fix what you see. Iterate until it looks great. Also test with `document.documentElement.classList.add('reduced')` (reduced motion) doesn't break anything.
+5. Remember `mount()` runs before the intro is dismissed: start heavy animation via `ctx.onSectionEnter(el, fn)` / `ctx.onEnter(fn)`.
+6. Final report (this is all I will see): files written, every button/interaction and what it does, the easter eggs you implemented, any core change you need from me (exact snippet), and any known issue. Keep it under 300 words.
