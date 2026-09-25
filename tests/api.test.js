@@ -112,3 +112,16 @@ test('unknown api routes 404 as json; static index served', async () => {
   const res = await fetch(base.replace('/api', '/'));
   assert.equal(res.status, 200); assert.match(await res.text(), /SIR ARCHIVES/);
 });
+
+test('admin roast CRUD works without sort_order column', async () => {
+  const auth = { authorization: `Bearer ${token}` };
+  const r = await j('POST', '/admin/roasts', { kind: 'oneliner', topic: 'food', text: 'He passes biryani better than footballs.' }, auth);
+  assert.equal(r.status, 201); assert.equal(r.data.topic, 'food');
+  const u = await j('PUT', `/admin/roasts/${r.data.id}`, { enabled: false, text: 'edited line here' }, auth);
+  assert.equal(u.status, 200); assert.equal(u.data.enabled, 0); assert.equal(u.data.text, 'edited line here');
+  assert.equal((await j('POST', '/admin/roasts/reorder', { ids: [r.data.id] }, auth)).status, 400);
+  assert.equal((await j('DELETE', `/admin/roasts/${r.data.id}`, null, auth)).data.ok, true);
+  const a = await j('POST', '/admin/awards', { title: 'Test award' }, auth);
+  assert.equal(a.status, 201); assert.equal(typeof a.data.sort_order, 'number');
+  assert.equal((await j('DELETE', `/admin/awards/${a.data.id}`, null, auth)).data.ok, true);
+});

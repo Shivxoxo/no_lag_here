@@ -85,11 +85,14 @@ router.put('/profile', (req, res) => {
 function crud(table, fields, { orderBy = 'sort_order, id' } = {}) {
   const r = express.Router();
   const cols = Object.keys(fields);
+  const hasOrder = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === 'sort_order');
+  if (!hasOrder && orderBy.includes('sort_order')) orderBy = 'id';
   r.get('/', (req, res) => res.json(db.prepare(`SELECT * FROM ${table} ORDER BY ${orderBy}`).all()));
   r.post('/', (req, res) => {
     const vals = {}; for (const c of cols) vals[c] = fields[c](req.body?.[c]);
-    const maxOrder = db.prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM ${table}`).get().n;
-    const info = db.prepare(`INSERT INTO ${table} (${cols.join(',')}, sort_order) VALUES (${cols.map(c => '@' + c).join(',')}, @sort_order)`).run({ ...vals, sort_order: maxOrder });
+    const info = hasOrder
+      ? db.prepare(`INSERT INTO ${table} (${cols.join(',')}, sort_order) VALUES (${cols.map(c => '@' + c).join(',')}, @sort_order)`).run({ ...vals, sort_order: db.prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM ${table}`).get().n })
+      : db.prepare(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(c => '@' + c).join(',')})`).run(vals);
     res.status(201).json(db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid));
   });
   r.put('/:id', (req, res) => {
@@ -98,7 +101,7 @@ function crud(table, fields, { orderBy = 'sort_order, id' } = {}) {
     if (!row) return res.status(404).json({ error: 'Not found' });
     const vals = {}; for (const c of cols) if (req.body?.[c] !== undefined) vals[c] = fields[c](req.body[c]);
     if ('enabled' in (req.body || {})) vals.enabled = V.bool(req.body.enabled) ? 1 : 0;
-    if ('sort_order' in (req.body || {})) vals.sort_order = V.int(req.body.sort_order, { min: 0, max: 10000 });
+    if (hasOrder && 'sort_order' in (req.body || {})) vals.sort_order = V.int(req.body.sort_order, { min: 0, max: 10000 });
     const keys = Object.keys(vals);
     if (keys.length) db.prepare(`UPDATE ${table} SET ${keys.map(k => `${k}=@${k}`).join(', ')} WHERE id = @id`).run({ ...vals, id });
     res.json(db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id));
@@ -109,6 +112,7 @@ function crud(table, fields, { orderBy = 'sort_order, id' } = {}) {
     res.json({ ok: info.changes > 0 });
   });
   r.post('/reorder', (req, res) => {
+    if (!hasOrder) return res.status(400).json({ error: `${table} cannot be reordered` });
     const ids = (req.body?.ids || []).map(x => V.int(x, { min: 1 }));
     const tx = db.transaction(() => ids.forEach((id, i) => db.prepare(`UPDATE ${table} SET sort_order = ? WHERE id = ?`).run(i, id)));
     tx();
