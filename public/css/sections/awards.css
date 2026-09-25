@@ -129,3 +129,8 @@ html.reduced .sec-awards .aw-bulbs { opacity: 1; }
   .sec-awards .aw-controls .btn { flex: 1 1 40%; }
   .sec-awards .aw-shelf-head { justify-content: center; text-align: center; }
 }
+
+/* winner photo on the stage card */
+.sec-awards .aw-winner-photo { position: relative; width: clamp(120px, 22vw, 190px); padding: 8px 8px 26px; background: #fff8e6; border-radius: 6px; box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 3px var(--gold); transform: rotate(-4deg); }
+.sec-awards .aw-winner-photo img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 3px; display: block; }
+.sec-awards .aw-winner-photo span { position: absolute; left: 0; right: 0; bottom: 6px; font-size: .55rem; letter-spacing: .3em; color: #6b5a2a; text-align: center; }

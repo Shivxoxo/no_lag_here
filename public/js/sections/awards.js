@@ -77,6 +77,7 @@ export default {
                 <div class="aw-trophy">${trophySvg('aw-trophy-stage')}<span class="aw-icon" aria-hidden="true">🏆</span></div>
                 <span class="aw-cat mono">CATEGORY</span>
                 <h3 class="aw-award-title display"><span class="aw-foil">—</span></h3>
+                <div class="aw-winner-photo" aria-hidden="true"><img alt="" loading="lazy"><span class="mono">THE WINNER</span></div>
                 <div class="aw-plate"><span class="aw-plate-k mono">WINNER</span><span class="aw-plate-name display">${esc(winner)}</span></div>
                 <p class="aw-body"></p>
                 <p class="aw-speech mono"><span class="aw-speech-k">ACCEPTANCE SPEECH:</span> <span class="aw-speech-text"></span></p>
@@ -177,6 +178,7 @@ export default {
       i = ((i % total) + total) % total;
       const id = ++runId;
       current = i;
+      { const wp = el.querySelector('.aw-winner-photo img'); const ph = ctx.photos; if (wp && ph.length) { const p = ph[i % ph.length]; wp.src = p.thumb || p.url; if (!motion.reduced) gsap.fromTo(wp.parentElement, { scale: 0.4, rotate: -20, opacity: 0 }, { scale: 1, rotate: -4, opacity: 1, duration: 0.9, delay: quick ? 0 : 2.2, ease: 'elastic.out(1, 0.5)' }); } }
       gsap.killTweensOf([env, flap, seal, card, trophy, ...spots]);
       closedState();
       const a = awards[i];
