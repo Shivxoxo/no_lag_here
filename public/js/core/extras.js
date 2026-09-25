@@ -5,6 +5,7 @@ import { state, esc, pick, shuffle } from './state.js';
 import { motion } from './motion.js';
 import { viewer } from './viewer.js';
 import { sfx } from './sfx.js';
+import { initWorld3D } from './world3d.js';
 
 const gsap = window.gsap, ScrollTrigger = window.ScrollTrigger;
 const THEME = {
@@ -28,6 +29,10 @@ export function initExtras() {
   endingMosaic(photos);
   ambientEmoji();
   cursorTrail();
+  aurora();
+  panelFolds();
+  const world = initWorld3D();
+  if (world) state.on('egg', () => world.pulse());
   ScrollTrigger.refresh();
 }
 
@@ -190,4 +195,24 @@ function cursorTrail() {
     d.style.background = accent; gsap.killTweensOf(d);
     gsap.fromTo(d, { x: e.clientX, y: e.clientY, scale: 1, opacity: 0.9 }, { x: e.clientX + (Math.random() - 0.5) * 40, y: e.clientY + 30 + Math.random() * 30, scale: 0, opacity: 0, duration: 0.7, ease: 'power2.out' });
   }, { passive: true });
+}
+
+// ── 12. Aurora colour blobs that follow the active section ─────────────
+function aurora() {
+  if (motion.reduced) return;
+  const a = document.createElement('div'); a.className = 'aurora'; a.setAttribute('aria-hidden', 'true'); a.innerHTML = '<i></i><i></i><i></i>'; document.body.prepend(a);
+  const P = { hero: ['#38e8ff', '#ff3d8f', '#c6ff3d'], archives: ['#38e8ff', '#8b5cff', '#38e8ff'], scouting: ['#2ee56b', '#c6ff3d', '#2ee56b'], pass: ['#2ee56b', '#ff3b3b', '#2ee56b'], nationals: ['#2ee56b', '#ffcc4d', '#38e8ff'], awards: ['#ffcc4d', '#ff8a3d', '#ffcc4d'], gaming: ['#8b5cff', '#ff3d8f', '#38e8ff'], anime: ['#ff3d8f', '#ffcc4d', '#8b5cff'], academics: ['#9fd8ff', '#38e8ff', '#9fd8ff'], gym: ['#ff8a3d', '#ff3b3b', '#ffcc4d'], food: ['#ff8a3d', '#ffcc4d', '#ff3d8f'], roast: ['#ff3b3b', '#ff8a3d', '#ff3b3b'], evidence: ['#ffcc4d', '#ff3b3b', '#ffcc4d'], timeline: ['#d8c8a8', '#ffcc4d', '#d8c8a8'], boss: ['#ff3b3b', '#8b5cff', '#ff3b3b'], ai: ['#c6ff3d', '#2ee56b', '#38e8ff'], compliment: ['#ffffff', '#ff3d8f', '#ffcc4d'], cake: ['#ffcc4d', '#ff3d8f', '#38e8ff'], messages: ['#38e8ff', '#c6ff3d', '#ff3d8f'], ending: ['#ffcc4d', '#ff3d8f', '#38e8ff'] };
+  state.on('section', (id) => { const p = P[id] || P.hero; a.style.setProperty('--w1', p[0]); a.style.setProperty('--w2', p[1]); a.style.setProperty('--w3', p[2]); });
+}
+
+// ── 13. Panels fold in with 3D rotation as they enter ──────────────────
+function panelFolds() {
+  if (motion.reduced) return;
+  const panels = [...document.querySelectorAll('.sec .glass, .sec .panel, .sec .card-3d')].filter(p => !p.closest('#hero') && !p.querySelector('.glass, .panel') && p.getBoundingClientRect().height < 900);
+  panels.forEach((p, i) => {
+    p.classList.add('x3d-fold');
+    gsap.set(p, { rotateX: -28, y: 40, opacity: 0, transformPerspective: 1000 });
+    ScrollTrigger.create({ trigger: p, start: 'top 90%', once: true, onEnter: () => gsap.to(p, { rotateX: 0, y: 0, opacity: 1, duration: 1, ease: 'expo.out', delay: (i % 4) * 0.08, clearProps: 'transform,opacity' }) });
+    if (!p.classList.contains('card-3d')) motion.tilt(p, { max: 4, scale: 1.005, glare: false });
+  });
 }
