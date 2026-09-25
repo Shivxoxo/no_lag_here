@@ -84,7 +84,7 @@ export const motion = {
     ScrollTrigger.batch(els, {
       start: 'top 88%',
       once,
-      onEnter: (batch) => gsap.to(batch, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger, overwrite: true, onComplete: () => batch.forEach(b => b.classList.add('is-revealed')) }),
+      onEnter: (batch) => gsap.to(batch, { opacity: 1, y: 0, duration: 0.9, ease: 'power3.out', stagger: Math.min(stagger, 1.2 / batch.length), overwrite: true, onComplete: () => batch.forEach(b => b.classList.add('is-revealed')) }),
     });
   },
 
@@ -112,7 +112,9 @@ export const motion = {
   /** Screen shake (used by boss fight, boom moments). */
   shake(el = document.body, { intensity = 8, duration = 0.5 } = {}) {
     if (reduced) return;
-    const tl = gsap.timeline();
+    // Never transform <body>/<html>: it would break every position:fixed overlay (HUD, viewer, cinematic).
+    if (el === document.body || el === document.documentElement) el = document.getElementById('app') || el;
+    const tl = gsap.timeline({ onComplete: () => gsap.set(el, { clearProps: 'transform' }) });
     for (let i = 0; i < 8; i++) tl.to(el, { x: (Math.random() - 0.5) * intensity * 2, y: (Math.random() - 0.5) * intensity * 2, duration: duration / 8 });
     tl.to(el, { x: 0, y: 0, duration: 0.1 });
     return tl;

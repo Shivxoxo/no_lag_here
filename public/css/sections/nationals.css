@@ -12,7 +12,7 @@
 .sec-nationals .nat-copy { display: flex; flex-direction: column; gap: clamp(16px, 2.4vh, 26px); }
 .sec-nationals .nat-title { color: #fff; text-shadow: 0 0 40px rgba(159,216,255,.25); }
 .sec-nationals .nat-title-2 { color: var(--flood); text-shadow: 0 0 40px rgba(223,240,255,.45); }
-.sec-nationals .nat-stamp-wrap { min-height: 3.6em; display: flex; }
+.sec-nationals .nat-stamp-wrap { min-height: 3.6em; display: flex; margin: 6px 0 14px; }
 .sec-nationals .nat-stamp { font-size: clamp(2rem, 5vw, 4.2rem); padding: 10px 26px; border-width: 4px; will-change: transform; }
 .sec-nationals .nat-stamp.is-ok { color: var(--pitch); text-shadow: 0 0 20px rgba(46,229,107,.45); }
 .sec-nationals .nat-line-1 { color: var(--fg); max-width: 34ch; }

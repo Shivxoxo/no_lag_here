@@ -133,10 +133,10 @@
 .boss-dmg.is-phase { font-size: 1.6rem; color: var(--aura); letter-spacing: .12em; }
 
 /* result */
-.boss-result { gap: 14px; background: radial-gradient(ellipse at 50% 30%, rgba(255,59,59,.14), transparent 60%), rgba(0,0,0,.75); overflow-y: auto; justify-content: flex-start; padding-top: clamp(24px, 5vh, 48px); }
+.boss-result { position: relative; inset: auto; min-height: clamp(420px, 58vh, 580px); gap: 14px; background: radial-gradient(ellipse at 50% 30%, rgba(255,59,59,.14), transparent 60%), rgba(0,0,0,.75); justify-content: flex-start; padding-top: clamp(24px, 5vh, 48px); }
 .boss-result-kicker { font-size: var(--fs-tiny); letter-spacing: .3em; color: var(--red); }
 .boss-result-title { font-size: clamp(2.2rem, 6vw, 4.6rem); line-height: .9; color: #fff; }
-.boss-result-sub { color: var(--fg-2); font-size: clamp(1rem, 1.4vw, 1.2rem); min-height: 1.5em; }
+.boss-result-sub { color: var(--fg-2); font-size: clamp(1rem, 1.4vw, 1.2rem); min-height: 1.5em; line-height: 1.4; max-width: 36ch; }
 .boss-result-stamp { display: none; position: absolute; right: 6%; top: 8%; padding: 6px 16px; border: 4px solid var(--gold); color: var(--gold); font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: .15em; transform: rotate(-10deg); text-shadow: 0 0 20px rgba(255,204,77,.5); opacity: 0; }
 .boss-score { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 26px; margin: 4px 0 0; font-size: var(--fs-tiny); letter-spacing: .18em; }
 .boss-score div { display: flex; flex-direction: column; align-items: center; gap: 4px; }
@@ -188,7 +188,7 @@ html.reduced .boss-aura { opacity: .5; }
   .boss-excuse { width: 150px; } .boss-excuse-t { font-size: 1.4rem; }
   .boss-form-row { flex-direction: column; }
   .boss-result-title { font-size: clamp(2rem, 9vw, 3rem); }
-  .boss-result-stamp { right: 4%; top: 4%; font-size: 1.4rem; border-width: 3px; }
+  .boss-result-stamp { position: static; transform: rotate(-4deg); font-size: 1.5rem; border-width: 3px; margin: -4px 0 2px; }
   .boss-foot { justify-content: center; text-align: center; }
   .boss-foot-mid { display: none; }
   .boss-corner { width: 16px; height: 16px; }

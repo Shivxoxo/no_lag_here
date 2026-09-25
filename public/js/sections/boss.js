@@ -279,8 +279,10 @@ export default {
       if (S.excuses.length) return;
       const text = pick(EXCUSES);
       const x = mk('boss-excuse', `<span class="boss-excuse-k mono">EXCUSE INCOMING</span><span class="boss-excuse-t display">${esc(text)}</span><span class="boss-excuse-bar"><i></i></span><span class="boss-excuse-hint mono">CLICK TO DENY</span>`, `Deny excuse: ${text}`);
-      const c = avatarCenter(); const a = arenaRect(); const left = c.x > a.width / 2 ? c.x - 260 : c.x + 90;
-      x.style.left = `${clamp(left, 6, Math.max(6, a.width - 176))}px`; x.style.top = `${clamp(c.y - 140, 6, a.height - 120)}px`;
+      const c = avatarCenter(); const a = arenaRect(); const r = avatar.offsetWidth / 2;
+      const narrow = a.width < 520; // phones: below the boss; desktop: beside him
+      const left = narrow ? c.x - 85 : (c.x > a.width / 2 ? c.x - r - 190 : c.x + r + 20);
+      x.style.left = `${clamp(left, 6, Math.max(6, a.width - 176))}px`; x.style.top = `${clamp(narrow ? c.y + r + 12 : c.y - 60, 6, Math.max(6, a.height - 120))}px`;
       spawn.appendChild(x); sfx.play('error'); say(text, 1400);
       const ex = { el: x, t: 2, done: false, bar: x.querySelector('.boss-excuse-bar i') };
       S.excuses.push(ex);

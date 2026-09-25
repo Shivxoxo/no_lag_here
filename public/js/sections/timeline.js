@@ -120,15 +120,20 @@ export default {
           if (yearEl.dataset.numeric === '1') motion.countUp(yearEl, target, { from: target - 37, duration: 1.2, format: (v) => String(Math.round(v)) });
         },
       });
-      ScrollTrigger.create({ trigger: card, start: 'top 55%', end: 'bottom 45%', onToggle: (st) => { if (st.isActive) setActive(i); } });
       if (!card.classList.contains('tl-empty')) motion.tilt(body, { max: 3, scale: 1.005, glare: false });
     });
-    if (motion.reduced) cards.forEach((c, i) => { motion.onVisible(c, (v) => { if (v) setActive(i); }); });
+    // active chapter = the entry closest to the middle of the viewport (reads only, one class toggle)
+    const pickActive = () => {
+      const mid = innerHeight * 0.5; let best = 0, bestD = Infinity;
+      cards.forEach((c, i) => { const r = c.getBoundingClientRect(); const d = Math.abs(r.top + r.height / 2 - mid); if (d < bestD) { bestD = d; best = i; } });
+      setActive(best);
+    };
+    ScrollTrigger.create({ trigger: track, start: 'top bottom', end: 'bottom top', onUpdate: pickActive, onEnter: pickActive, onEnterBack: pickActive });
 
     // ── Chapter navigation ────────────────────────────────────
     navBtns.forEach(b => b.addEventListener('click', () => {
       const target = cards[Number(b.dataset.target)]; if (!target) return;
-      sfx.play('whoosh');
+      sfx.play('whoosh'); setActive(Number(b.dataset.target));
       // native smooth scroll (html has scroll-behavior: smooth); .tl-entry carries scroll-margin-top for the HUD
       target.scrollIntoView({ block: 'start', behavior: motion.reduced ? 'auto' : 'smooth' });
     }));

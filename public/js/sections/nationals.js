@@ -106,8 +106,8 @@ export default {
       scene.fog = new THREE.FogExp2(0x03060c, 0.0075);
 
       // Lights: cold floodlight white + faint ambient
-      scene.add(new THREE.AmbientLight(0x2a3550, 0.9));
-      scene.add(new THREE.HemisphereLight(0x8fb4ff, 0x04120a, 0.35));
+      scene.add(new THREE.AmbientLight(0x3a4a70, 1.4));
+      scene.add(new THREE.HemisphereLight(0x9fc4ff, 0x04120a, 0.6));
 
       // Pitch (canvas texture with lines)
       const pc = document.createElement('canvas'); pc.width = 1024; pc.height = 660;
@@ -126,7 +126,7 @@ export default {
       ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05; scene.add(ground);
 
       // Stadium bowl: three conical tiers + separator rings
-      const tierMat = new THREE.MeshLambertMaterial({ color: 0x1b2130, side: THREE.DoubleSide });
+      const tierMat = new THREE.MeshLambertMaterial({ color: 0x28304a, side: THREE.DoubleSide });
       const tiers = [{ rb: 46, rt: 62, y: 0, h: 9 }, { rb: 63, rt: 80, y: 10.5, h: 9.5 }, { rb: 81, rt: 96, y: 21.5, h: 9 }];
       const stands = [];
       for (const t of tiers) {
@@ -147,7 +147,7 @@ export default {
       // Crowd particles on the tiers (shader with flicker + gold flash)
       const COUNT = 7000;
       const pos = new Float32Array(COUNT * 3), col = new Float32Array(COUNT * 3), seed = new Float32Array(COUNT);
-      const palette = [[0.35, 0.42, 0.62], [0.62, 0.3, 0.38], [0.3, 0.55, 0.45], [0.7, 0.72, 0.8], [0.25, 0.35, 0.6], [0.55, 0.55, 0.6], [0.8, 0.35, 0.3]];
+      const palette = [[0.45, 0.55, 0.85], [0.85, 0.4, 0.5], [0.4, 0.75, 0.6], [0.9, 0.92, 1.0], [0.35, 0.5, 0.9], [0.75, 0.75, 0.85], [1.0, 0.5, 0.4], [0.95, 0.85, 0.5]];
       for (let i = 0; i < COUNT; i++) {
         const t = tiers[Math.floor(Math.random() * tiers.length)], u = Math.random(), a = Math.random() * Math.PI * 2;
         const r = t.rb + (t.rt - t.rb) * u - 0.6;
@@ -158,11 +158,11 @@ export default {
       const cgeo = new THREE.BufferGeometry();
       cgeo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); cgeo.setAttribute('color', new THREE.BufferAttribute(col, 3)); cgeo.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
       const cmat = new THREE.ShaderMaterial({
-        uniforms: { uTime: { value: 0 }, uGold: { value: 0 }, uScale: { value: 1 } },
+        uniforms: { uTime: { value: 0 }, uGold: { value: 0 }, uScale: { value: three.renderer.getPixelRatio() } },
         vertexShader: `attribute float seed; attribute vec3 color; uniform float uTime; uniform float uGold; uniform float uScale; varying vec3 vC; varying float vA;
           void main(){ float f = 0.55 + 0.45 * sin(uTime * (1.5 + fract(seed) * 3.0) + seed * 7.0); float flash = step(0.985, fract(sin(seed * 12.9898 + floor(uTime * 6.0)) * 43758.5453));
             vec3 gold = vec3(1.0, 0.8, 0.3) * (0.9 + 0.6 * sin(uTime * 12.0 + seed)); vC = mix(color * (0.6 + 0.4 * f) + flash * 0.9, gold, uGold); vA = 0.75 + 0.25 * f;
-            vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_PointSize = (1.6 + flash * 1.6 + uGold * 1.2) * uScale * (140.0 / -mv.z); gl_Position = projectionMatrix * mv; }`,
+            vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_PointSize = (3.2 + flash * 2.0 + uGold * 1.5) * uScale * (150.0 / -mv.z); gl_Position = projectionMatrix * mv; }`,
         fragmentShader: `varying vec3 vC; varying float vA; void main(){ vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; gl_FragColor = vec4(vC, vA); }`,
         transparent: true, depthWrite: false,
       });
