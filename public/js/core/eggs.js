@@ -55,7 +55,7 @@ export const eggs = {
     // Developer message in the console
     const css = 'color:#c6ff3d;background:#050508;font-family:monospace;font-size:12px;padding:6px 10px;border:1px solid #c6ff3d;border-radius:6px';
     console.log('%c▌THE SIR ARCHIVES ▌ developer channel', css);
-    console.log('%cYou opened the console. Respect. Type  SIR.dev()  to claim your reward.\nBuilt with friendship, chaos, and absolutely zero mercy by Shiv + Alex.', 'color:#8a8a9c;font-family:monospace');
+    console.log('%cYou opened the console. Respect. Type  SIR.dev()  to claim your reward.\nBuilt with friendship, chaos, and absolutely zero mercy by Shiv.', 'color:#8a8a9c;font-family:monospace');
     window.SIR = Object.assign(window.SIR || {}, {
       dev() { eggs.unlock('dev-message'); return '🫡 Developer message acknowledged. He still missed the pass.'; },
       eggs: () => ({ found: [...state.eggsFound], total: state.eggsTotal }),

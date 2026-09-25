@@ -68,7 +68,7 @@ export default {
               <span class="ev-pin ev-pin-blue" aria-hidden="true"></span>
               <span class="eyebrow">CASE FILE #${esc(String(profile.age).padStart(3, '0'))} · INVESTIGATION BOARD</span>
               <h2 class="display h1 ev-title">THE EVIDENCE ROOM</h2>
-              <p class="ev-lead">Every photograph of ${esc(nick)} has been examined by two unpaid detectives (${esc(profile.made_by || 'Shiv + Alex')}). Findings: guilty of being late, guilty of anime, guilty of that pass.</p>
+              <p class="ev-lead">Every photograph of ${esc(nick)} has been examined by one unpaid detective (${esc(profile.made_by || 'Shiv')}). Findings: guilty of being late, guilty of anime, guilty of that pass.</p>
               <span class="stamp ev-stamp" aria-hidden="true">CONFIDENTIAL</span>
               <span class="ev-disclaimer mono">Captions are 100% fabricated by his friends. Photos are 100% real. Unfortunately.</span>
             </div>

@@ -38,7 +38,7 @@ export default {
         <div class="sec-head roast-head">
           <span class="eyebrow">MODULE 12 · INDUSTRIAL ROAST ENGINE v4.0 · SERIAL RE-${esc(String(profile.age))}-${esc(nick)}</span>
           <h2 class="display h1 roast-title">${esc(nick)} ROAST<br><span class="roast-title-sub">GENERATOR</span></h2>
-          <p class="lead">Heavy machinery. Zero mercy. Every roast is assembled live from certified ${esc(first)} facts by the ${esc(profile.made_by || 'Shiv + Alex')} Roast Foundry.</p>
+          <p class="lead">Heavy machinery. Zero mercy. Every roast is assembled live from certified ${esc(first)} facts by the ${esc(profile.made_by || 'Shiv')} Roast Foundry.</p>
         </div>
 
         <div class="roast-console">

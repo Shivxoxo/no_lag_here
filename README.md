@@ -300,4 +300,4 @@ npm test           # backend API tests (temporary database)
 - **Backend offline toast** → the frontend still renders with fallback content but nothing is saved.
 - **Stats reset on deploy** → your `DATABASE_PATH` is on an ephemeral disk; mount a volume (§12).
 
-Made by Shiv + Alex. With friendship, chaos, and absolutely zero mercy.
+Made by Shiv. With friendship, chaos, and absolutely zero mercy.

@@ -7,7 +7,7 @@ export default {
     const nick = (profile.nickname || 'SIR').toUpperCase();
     const first = (profile.first_name || profile.name?.split(' ')[0] || 'SIR').toUpperCase();
     const age = Number(profile.age) || 16;
-    const madeBy = profile.made_by || 'Shiv + Alex';
+    const madeBy = profile.made_by || 'Shiv';
     const year = new Date().getFullYear();
     const eggDefs = data.easter_eggs || [];
 

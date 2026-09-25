@@ -19,7 +19,7 @@ module.exports = {
   favourite_food: 'Biryani (and everything else)',
   games: 'Free Fire, BGMI',
   hero_photo: 'photo14.jpg',
-  made_by: 'Shiv + Alex',
+  made_by: 'Shiv',
   friends: ['Shiv', 'Alex', 'Jason'],
   tagline: 'Unfortunately, you survived another year.',
 };

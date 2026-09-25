@@ -40,7 +40,7 @@ const SECTIONS = [hero, archives, scouting, pass, nationals, awards, gaming, ani
 
 // Used only if the API is unreachable (static hosting demo) so the page still renders.
 const FALLBACK = {
-  profile: { name: 'Shreaysh Shenal Munda', first_name: 'Shreaysh', nickname: 'SIR', age: 16, birthday: '2026-09-26', position: 'Midfielder', codename: 'SIR', known_weakness: 'Perfect passes', primary_habit: 'Being late', secondary_habit: 'Watching anime', combat_class: 'Professional Procrastinator', favourite_food: 'Biryani', games: 'Free Fire, BGMI', hero_photo: 'photo14.jpg', made_by: 'Shiv + Alex', friends: ['Shiv', 'Alex', 'Jason'], tagline: 'Unfortunately, you survived another year.' },
+  profile: { name: 'Shreaysh Shenal Munda', first_name: 'Shreaysh', nickname: 'SIR', age: 16, birthday: '2026-09-26', position: 'Midfielder', codename: 'SIR', known_weakness: 'Perfect passes', primary_habit: 'Being late', secondary_habit: 'Watching anime', combat_class: 'Professional Procrastinator', favourite_food: 'Biryani', games: 'Free Fire, BGMI', hero_photo: 'photo14.jpg', made_by: 'Shiv', friends: ['Shiv', 'Alex', 'Jason'], tagline: 'Unfortunately, you survived another year.' },
   photos: [], timeline: [], awards: [], settings: {}, stats: {}, easter_eggs: [], roast_count: 0, offline: true,
 };
 
