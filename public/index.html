@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>THE SIR ARCHIVES</title>
+  <meta name="description" content="A classified, over-engineered birthday investigation. Subject: SIR. Mercy: 0%. Friendship: 100%.">
+  <meta name="theme-color" content="#050508">
+  <meta property="og:title" content="THE SIR ARCHIVES">
+  <meta property="og:description" content="Unfortunately, he survived another year.">
+  <meta property="og:image" content="assets/photos/photo14.jpg">
+  <link rel="icon" href="assets/svg/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/hud.css">
+  <link rel="stylesheet" href="css/sections/hero.css">
+  <link rel="stylesheet" href="css/sections/archives.css">
+  <link rel="stylesheet" href="css/sections/scouting.css">
+  <link rel="stylesheet" href="css/sections/pass.css">
+  <link rel="stylesheet" href="css/sections/nationals.css">
+  <link rel="stylesheet" href="css/sections/awards.css">
+  <link rel="stylesheet" href="css/sections/gaming.css">
+  <link rel="stylesheet" href="css/sections/anime.css">
+  <link rel="stylesheet" href="css/sections/academics.css">
+  <link rel="stylesheet" href="css/sections/gym.css">
+  <link rel="stylesheet" href="css/sections/food.css">
+  <link rel="stylesheet" href="css/sections/roast.css">
+  <link rel="stylesheet" href="css/sections/evidence.css">
+  <link rel="stylesheet" href="css/sections/timeline.css">
+  <link rel="stylesheet" href="css/sections/boss.css">
+  <link rel="stylesheet" href="css/sections/ai.css">
+  <link rel="stylesheet" href="css/sections/compliment.css">
+  <link rel="stylesheet" href="css/sections/cake.css">
+  <link rel="stylesheet" href="css/sections/messages.css">
+  <link rel="stylesheet" href="css/sections/ending.css">
+  <link rel="stylesheet" href="css/extras.css">
+  <script>document.documentElement.classList.replace('no-js','js')</script>
+  <script type="importmap">
+    { "imports": { "three": "/vendor/three/three.module.js", "three/addons/": "/vendor/three/jsm/" } }
+  </script>
+</head>
+<body class="is-booting">
+  <div class="noise" aria-hidden="true"></div>
+
+  <!-- 00 · SYSTEM INITIALIZATION (full-screen overlay, built by js/core/intro.js) -->
+  <div id="boot" class="boot" role="dialog" aria-modal="true" aria-label="System initialization">
+    <noscript><div class="boot-noscript">THE SIR ARCHIVES require JavaScript. Even SIR knows that.</div></noscript>
+  </div>
+
+  <!-- HUD: progress, nav, sound, easter-egg counter -->
+  <header id="hud" class="hud" aria-label="Site controls"></header>
+
+  <main id="app" class="app">
+    <section id="hero"       class="sec sec-hero"       data-section="hero"       aria-label="Happy Birthday"></section>
+    <section id="archives"   class="sec sec-archives"   data-section="archives"   aria-label="The SIR Archives"></section>
+    <section id="scouting"   class="sec sec-scouting"   data-section="scouting"   aria-label="Professional Scouting Report"></section>
+    <section id="pass"       class="sec sec-pass"       data-section="pass"       aria-label="The Perfect Pass"></section>
+    <section id="nationals"  class="sec sec-nationals"  data-section="nationals"  aria-label="The Nationals File"></section>
+    <section id="awards"     class="sec sec-awards"     data-section="awards"     aria-label="Award Ceremony"></section>
+    <section id="gaming"     class="sec sec-gaming"     data-section="gaming"     aria-label="SIR Gaming Division"></section>
+    <section id="anime"      class="sec sec-anime"      data-section="anime"      aria-label="Anime Consumption Analysis"></section>
+    <section id="academics"  class="sec sec-academics"  data-section="academics"  aria-label="Academic Performance Analysis"></section>
+    <section id="gym"        class="sec sec-gym"        data-section="gym"        aria-label="The Gym Chronicles"></section>
+    <section id="food"       class="sec sec-food"       data-section="food"       aria-label="SIR Food Division"></section>
+    <section id="roast"      class="sec sec-roast"      data-section="roast"      aria-label="SIR Roast Generator"></section>
+    <section id="evidence"   class="sec sec-evidence"   data-section="evidence"   aria-label="The Evidence Room"></section>
+    <section id="timeline"   class="sec sec-timeline"   data-section="timeline"   aria-label="The History of SIR"></section>
+    <section id="boss"       class="sec sec-boss"       data-section="boss"       aria-label="SIR Final Boss"></section>
+    <section id="ai"         class="sec sec-ai"         data-section="ai"         aria-label="SIR-AI Analysis Core"></section>
+    <section id="compliment" class="sec sec-compliment" data-section="compliment" aria-label="One Compliment"></section>
+    <section id="cake"       class="sec sec-cake"       data-section="cake"       aria-label="Birthday Cake"></section>
+    <section id="messages"   class="sec sec-messages"   data-section="messages"   aria-label="Birthday Transmissions"></section>
+    <section id="ending"     class="sec sec-ending"     data-section="ending"     aria-label="Case File Closing"></section>
+  </main>
+
+  <!-- Fullscreen evidence viewer -->
+  <div id="viewer" class="viewer" hidden role="dialog" aria-modal="true" aria-label="Evidence viewer"></div>
+  <!-- Cinematic overlay (compliment freeze, transitions) -->
+  <div id="cine" class="cine" hidden aria-live="polite"></div>
+  <!-- Toasts -->
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <!-- Global particle layer -->
+  <canvas id="fx" class="fx" aria-hidden="true"></canvas>
+
+  <script src="/vendor/gsap/gsap.min.js"></script>
+  <script src="/vendor/gsap/ScrollTrigger.min.js"></script>
+  <script src="/vendor/gsap/ScrollToPlugin.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

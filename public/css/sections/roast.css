@@ -1,0 +1,165 @@
+/* 12 · ROAST — industrial roast-engine console (scoped under .sec-roast) */
+.sec-roast {
+  --accent: var(--red); --accent-rgb: 255, 59, 59;
+  --steel: #15151b; --steel-2: #0d0d12; --steel-line: #2a2a34; --warn: #ffcc4d;
+  padding-top: calc(var(--sec-pad) + 18px); padding-bottom: calc(var(--sec-pad) + 18px);
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at 50% 120%, rgba(255,59,59,.14), transparent 55%),
+    linear-gradient(180deg, #0b0b0f, #060608 60%, #0a0709);
+}
+.sec-roast::before { display: none; }
+.sec-roast .roast-glow { position: absolute; inset: 0; pointer-events: none; z-index: 0; background: radial-gradient(ellipse at 70% 40%, rgba(255,59,59,.07), transparent 50%); transition: opacity .6s; }
+.sec-roast.is-hot .roast-glow { background: radial-gradient(ellipse at 70% 40%, rgba(255,59,59,.2), transparent 55%); }
+.sec-roast .roast-stripes { position: absolute; left: 0; right: 0; height: 14px; z-index: 1; opacity: .85;
+  background: repeating-linear-gradient(-45deg, var(--warn) 0 16px, #0a0a0a 16px 32px); box-shadow: 0 0 0 1px #000, 0 6px 30px rgba(0,0,0,.6); }
+.sec-roast .roast-stripes-top { top: 0; } .sec-roast .roast-stripes-bottom { bottom: 0; }
+.sec-roast .roast-head { position: relative; z-index: 1; }
+.sec-roast .roast-title { color: #fff; }
+.sec-roast .roast-title-sub { color: var(--red); text-shadow: 0 0 40px rgba(255,59,59,.35); }
+
+/* console layout */
+.sec-roast .roast-console { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: clamp(16px, 2.4vw, 32px); align-items: start; }
+.sec-roast .roast-panel { position: relative; border-radius: 16px; padding: clamp(18px, 2.4vw, 28px);
+  background: linear-gradient(170deg, #1c1c24, var(--steel) 40%, var(--steel-2)); border: 1px solid var(--steel-line);
+  box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(0,0,0,.6); }
+.sec-roast .roast-screw { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #4a4a56, #16161c 70%); box-shadow: inset 0 1px 1px rgba(255,255,255,.2), 0 1px 2px #000; }
+.sec-roast .roast-screw::after { content: ''; position: absolute; left: 50%; top: 50%; width: 8px; height: 2px; background: #000; transform: translate(-50%, -50%) rotate(35deg); opacity: .7; }
+.sec-roast .roast-screw.tl { top: 8px; left: 8px; } .sec-roast .roast-screw.tr { top: 8px; right: 8px; } .sec-roast .roast-screw.bl { bottom: 8px; left: 8px; } .sec-roast .roast-screw.br { bottom: 8px; right: 8px; }
+.sec-roast .roast-plate { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: -4px 0 18px; padding: 6px 12px; font-size: var(--fs-tiny); letter-spacing: .3em; color: #9a9aab; background: #0a0a0e; border: 1px solid #000; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); }
+.sec-roast .roast-plate-right { display: inline-flex; align-items: center; gap: 8px; color: var(--red); }
+.sec-roast .roast-rec { animation: pulse 1.4s infinite; }
+
+/* LEDs */
+.sec-roast .roast-leds { display: grid; gap: 8px; margin: 0 0 20px; font-size: var(--fs-tiny); letter-spacing: .16em; }
+.sec-roast .roast-leds > div { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; background: rgba(0,0,0,.35); border-radius: 6px; border: 1px solid rgba(255,255,255,.04); }
+.sec-roast .roast-leds dt { color: var(--muted); }
+.sec-roast .roast-leds dd { margin: 0; display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
+.sec-roast .led { width: 9px; height: 9px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor, 0 0 16px currentColor; }
+.sec-roast .led-ok { color: var(--pitch); } .sec-roast .led-bad { color: var(--red); } .sec-roast .led-warn { color: var(--warn); }
+
+/* heat gauge */
+.sec-roast .roast-gauge-wrap { display: grid; place-items: center; margin-bottom: 14px; padding: 8px 10px 4px; background: radial-gradient(ellipse at 50% 90%, rgba(255,59,59,.12), transparent 60%), #08080b; border-radius: 12px; border: 1px solid #000; box-shadow: inset 0 0 24px rgba(0,0,0,.8); }
+.sec-roast .roast-gauge { width: min(100%, 240px); height: auto; overflow: visible; }
+.sec-roast .roast-gauge-track { fill: none; stroke: rgba(255,255,255,.08); stroke-width: 14; stroke-linecap: round; }
+.sec-roast .roast-gauge-fill { fill: none; stroke: url(#roast-heat-grad); stroke-width: 14; stroke-linecap: round; stroke-dasharray: 100; stroke-dashoffset: 100; filter: drop-shadow(0 0 6px rgba(255,120,60,.6)); }
+.sec-roast .roast-gauge-ticks line { stroke: rgba(255,255,255,.35); stroke-width: 1.5; }
+.sec-roast .roast-gauge-needle { stroke: #fff; stroke-width: 3; stroke-linecap: round; filter: drop-shadow(0 0 4px rgba(255,255,255,.5)); }
+.sec-roast .roast-gauge-hub { fill: #2a2a34; stroke: #fff; stroke-width: 2; }
+.sec-roast .roast-gauge-text { font-family: var(--font-display); font-size: 26px; fill: #fff; letter-spacing: .04em; }
+.sec-roast .roast-gauge-label { display: flex; justify-content: space-between; width: 100%; font-size: var(--fs-tiny); letter-spacing: .3em; color: var(--muted); padding: 4px 6px 6px; }
+.sec-roast .roast-heat-msg { color: var(--pitch); font-weight: 700; }
+.sec-roast .roast-heat-msg[data-state="warming"] { color: var(--warn); }
+.sec-roast .roast-heat-msg[data-state="hot"] { color: var(--orange); }
+.sec-roast .roast-heat-msg[data-state="danger"], .sec-roast .roast-heat-msg[data-state="critical"] { color: var(--red); animation: blink 0.6s steps(2, start) infinite; }
+.sec-roast.is-overheated .roast-gauge-wrap { box-shadow: inset 0 0 24px rgba(0,0,0,.8), 0 0 30px rgba(255,59,59,.35); animation: pulse .5s infinite; }
+
+/* dials */
+.sec-roast .roast-dials { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+.sec-roast .roast-dial { position: relative; display: grid; justify-items: center; gap: 4px; padding: 12px 8px 10px; border-radius: 12px; background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.05); transition: border-color .2s, background .2s; min-height: 44px; }
+.sec-roast .roast-dial:hover { border-color: rgba(255,255,255,.14); background: rgba(0,0,0,.45); }
+.sec-roast .roast-dial-ring { position: absolute; top: 8px; left: 50%; width: 70px; height: 70px; transform: translateX(-50%); border-radius: 50%; pointer-events: none;
+  background: repeating-conic-gradient(from -120deg, rgba(255,255,255,.35) 0 1deg, transparent 1deg 15deg) ; -webkit-mask: radial-gradient(circle, transparent 60%, #000 62%, #000 70%, transparent 72%); mask: radial-gradient(circle, transparent 60%, #000 62%, #000 70%, transparent 72%); }
+.sec-roast .roast-knob { position: relative; width: 54px; height: 54px; margin: 8px 0 6px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #4a4a58, #1a1a22 60%, #0c0c10); box-shadow: 0 6px 14px rgba(0,0,0,.7), inset 0 1px 1px rgba(255,255,255,.25), inset 0 -2px 4px rgba(0,0,0,.8); will-change: transform; }
+.sec-roast .roast-knob-mark { position: absolute; left: 50%; top: 5px; width: 4px; height: 16px; margin-left: -2px; border-radius: 2px; background: var(--red); box-shadow: 0 0 8px var(--red); }
+.sec-roast .roast-dial-locked .roast-knob-mark { background: #666; box-shadow: none; }
+.sec-roast .roast-dial-locked .roast-knob::after { content: '✕'; position: absolute; inset: 0; display: grid; place-items: center; color: var(--red); font-size: 1.2rem; font-weight: 700; opacity: .8; }
+.sec-roast .roast-dial-name { font-size: var(--fs-tiny); letter-spacing: .28em; color: var(--muted); }
+.sec-roast .roast-dial-val { font-size: var(--fs-tiny); font-weight: 700; letter-spacing: .16em; color: var(--warn); }
+.sec-roast .roast-dial[data-level="mild"] .roast-dial-val { color: var(--pitch); }
+.sec-roast .roast-dial[data-level="nuclear"] .roast-dial-val { color: var(--red); }
+.sec-roast .roast-dial-locked .roast-dial-val { color: var(--red); }
+
+/* topic chips */
+.sec-roast .roast-topics { margin-bottom: 20px; }
+.sec-roast .roast-topics-label { display: block; font-size: var(--fs-tiny); letter-spacing: .3em; color: var(--muted); margin-bottom: 8px; }
+.sec-roast .roast-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sec-roast .roast-chip { min-height: 40px; padding: 8px 12px; border-radius: 6px; font-size: var(--fs-tiny); letter-spacing: .16em; color: var(--fg-2); background: #0a0a0e; border: 1px solid #000; box-shadow: inset 0 0 0 1px rgba(255,255,255,.07), 0 2px 0 #000; transition: color .2s, box-shadow .2s, transform .1s; }
+.sec-roast .roast-chip:hover { color: #fff; box-shadow: inset 0 0 0 1px rgba(255,255,255,.2), 0 2px 0 #000; }
+.sec-roast .roast-chip[aria-pressed="true"] { color: #000; background: var(--warn); box-shadow: inset 0 0 0 1px rgba(0,0,0,.2), 0 0 16px rgba(255,204,77,.35); font-weight: 700; }
+
+/* the big red button */
+.sec-roast .roast-fire-housing { display: grid; justify-items: center; gap: 10px; padding: 18px 14px 14px; border-radius: 14px;
+  background: repeating-linear-gradient(-45deg, rgba(255,204,77,.85) 0 12px, #101014 12px 24px); position: relative; }
+.sec-roast .roast-fire-housing::before { content: ''; position: absolute; inset: 6px; border-radius: 10px; background: #0b0b0f; box-shadow: inset 0 0 20px rgba(0,0,0,.9); }
+.sec-roast .roast-fire { position: relative; width: 100%; max-width: 320px; min-height: 84px; font-family: var(--font-display); font-size: clamp(1.8rem, 2.6vw, 2.4rem); letter-spacing: .12em; border-radius: 18px;
+  background: linear-gradient(180deg, #ff5f5f, #e21f1f 55%, #a80f0f); border: 2px solid #5a0808;
+  box-shadow: 0 10px 0 #5f0a0a, 0 16px 30px rgba(255,59,59,.35), inset 0 2px 0 rgba(255,255,255,.35), inset 0 -6px 12px rgba(0,0,0,.35); text-shadow: 0 2px 0 rgba(0,0,0,.35); }
+.sec-roast .roast-fire:hover { transform: translateY(-2px); box-shadow: 0 12px 0 #5f0a0a, 0 22px 50px rgba(255,59,59,.5), inset 0 2px 0 rgba(255,255,255,.35), inset 0 -6px 12px rgba(0,0,0,.35); }
+.sec-roast .roast-fire:active { transform: translateY(6px); box-shadow: 0 4px 0 #5f0a0a, 0 8px 20px rgba(255,59,59,.3), inset 0 2px 0 rgba(255,255,255,.2), inset 0 -3px 8px rgba(0,0,0,.4); }
+.sec-roast .roast-fire:disabled { opacity: .55; transform: translateY(4px); box-shadow: 0 6px 0 #5f0a0a; }
+.sec-roast .roast-fire-loading { display: none; font-size: 1rem; letter-spacing: .3em; }
+.sec-roast .roast-fire.is-loading { background: repeating-linear-gradient(-45deg, #b31a1a 0 14px, #7a0d0d 14px 28px); background-size: 40px 40px; animation: roast-stripe-move 0.8s linear infinite; }
+.sec-roast .roast-fire.is-loading .roast-fire-label { display: none; }
+.sec-roast .roast-fire.is-loading .roast-fire-loading { display: inline; }
+.sec-roast .roast-dots::after { content: ''; animation: roast-dots 1s steps(4, end) infinite; }
+@keyframes roast-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+@keyframes roast-stripe-move { to { background-position: 40px 0; } }
+.sec-roast .roast-fire-hint { position: relative; font-size: var(--fs-tiny); letter-spacing: .2em; color: var(--muted); }
+.sec-roast .roast-fire-hint kbd { display: inline-block; padding: 1px 6px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 4px; font-family: inherit; color: var(--fg); }
+
+/* display / CRT */
+.sec-roast .roast-display { display: flex; flex-direction: column; min-height: 100%; }
+.sec-roast .roast-screen { position: relative; flex: 1; min-height: clamp(300px, 42vh, 460px); padding: clamp(22px, 3.5vw, 44px) clamp(22px, 3.5vw, 44px) 56px; border-radius: 10px; overflow: hidden; isolation: isolate;
+  background: radial-gradient(ellipse at 50% 30%, #17090b, #050505 70%); border: 2px solid #000; box-shadow: inset 0 0 60px rgba(0,0,0,.9), inset 0 0 0 1px rgba(255,59,59,.15), 0 0 0 4px #0b0b0f, 0 0 0 5px #23232c; }
+.sec-roast .roast-scanlines { position: absolute; inset: 0; pointer-events: none; z-index: 2; background: repeating-linear-gradient(0deg, rgba(0,0,0,.28) 0 2px, transparent 2px 4px); mix-blend-mode: multiply; }
+.sec-roast .roast-flash { position: absolute; inset: 0; z-index: 3; pointer-events: none; background: #fff; opacity: 0; mix-blend-mode: screen; }
+.sec-roast .roast-watermark { position: absolute; right: -2%; bottom: -8%; z-index: 0; pointer-events: none; font-size: clamp(8rem, 26vw, 24rem); line-height: .8; color: rgba(255,59,59,.05); letter-spacing: -.02em; user-select: none; }
+.sec-roast .roast-screen-foot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; padding: 10px clamp(16px, 2.5vw, 28px); font-size: var(--fs-tiny); letter-spacing: .2em; color: rgba(255,255,255,.32); border-top: 1px solid rgba(255,255,255,.06); background: rgba(0,0,0,.35); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec-roast .roast-idle, .sec-roast .roast-output, .sec-roast .roast-overheat, .sec-roast .roast-classified { position: relative; z-index: 1; }
+.sec-roast .roast-idle { display: grid; gap: 10px; font-size: clamp(.8rem, 1.2vw, .95rem); color: var(--acid); letter-spacing: .06em; }
+.sec-roast .roast-idle-line { display: block; }
+.sec-roast .roast-idle .cursor::after { color: var(--acid); }
+.sec-roast .roast-output { display: grid; gap: 22px; padding-bottom: 64px; }
+.sec-roast .roast-text { font-size: clamp(1.7rem, 3.4vw, 3.4rem); line-height: 1.02; color: #fff; text-shadow: 0 0 30px rgba(255,59,59,.25); min-height: 1.1em; text-wrap: balance; }
+.sec-roast .roast-parts { display: flex; flex-direction: column; gap: 6px; padding-top: 18px; border-top: 1px dashed rgba(255,255,255,.14); }
+.sec-roast .roast-part { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: baseline; font-size: var(--fs-small); color: var(--fg-2); }
+.sec-roast .roast-part-kind { font-size: var(--fs-tiny); letter-spacing: .24em; color: var(--red); padding: 2px 6px; border: 1px solid rgba(255,59,59,.35); border-radius: 4px; text-align: center; }
+.sec-roast .roast-stamp { position: absolute; right: 8px; bottom: 0; opacity: 0; font-size: clamp(1.6rem, 3.6vw, 3.2rem); pointer-events: none; z-index: 4; }
+.sec-roast .roast-overheat { display: grid; place-items: center; gap: 8px; min-height: 220px; text-align: center; font-size: clamp(2.2rem, 5vw, 4.2rem); color: var(--red); text-shadow: 0 0 40px rgba(255,59,59,.5); }
+.sec-roast .roast-overheat .mono { font-size: var(--fs-small); letter-spacing: .3em; color: var(--warn); }
+.sec-roast .roast-classified { position: relative; display: grid; gap: 14px; padding: clamp(18px, 3vw, 28px); border: 2px solid var(--red); border-radius: 8px; background: repeating-linear-gradient(-45deg, rgba(255,59,59,.05) 0 10px, transparent 10px 20px), rgba(20,0,0,.6); }
+.sec-roast .roast-classified-stamp { position: absolute; right: 8px; top: -18px; font-size: clamp(1.6rem, 3.2vw, 2.8rem); z-index: 4; }
+.sec-roast .roast-classified-kicker { font-size: var(--fs-tiny); letter-spacing: .3em; color: var(--red); }
+.sec-roast .roast-classified-text { font-size: clamp(1.5rem, 2.8vw, 2.6rem); line-height: 1.05; color: #fff; }
+.sec-roast.is-classified .roast-screen { animation: roast-glitch .18s steps(2, end) 6; }
+@keyframes roast-glitch { 0% { transform: translate(-2px, 1px); filter: hue-rotate(0deg); } 50% { transform: translate(3px, -2px); filter: hue-rotate(90deg); } 100% { transform: none; filter: none; } }
+
+.sec-roast .roast-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 16px; }
+.sec-roast .roast-topic-readout { margin-left: auto; font-size: var(--fs-tiny); letter-spacing: .24em; color: var(--muted); }
+.sec-roast .roast-topic-readout b { color: var(--warn); }
+.sec-roast .roast-counters { display: grid; grid-template-columns: 1fr auto; gap: 14px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--steel-line); }
+.sec-roast .roast-counter { display: grid; gap: 4px; }
+.sec-roast .roast-counter-label { font-size: var(--fs-tiny); letter-spacing: .28em; color: var(--muted); }
+.sec-roast .roast-counter-num { font-size: clamp(2.6rem, 5vw, 4.4rem); line-height: .95; color: #fff; display: inline-block; transform-origin: left center; }
+.sec-roast .roast-num-session { color: var(--red); }
+
+/* ticker */
+.sec-roast .roast-ticker { position: relative; z-index: 1; display: flex; align-items: stretch; margin: clamp(28px, 4vw, 48px) 0 0; border-top: 1px solid var(--steel-line); border-bottom: 1px solid var(--steel-line); background: #08080b; overflow: hidden; }
+.sec-roast .roast-ticker-tag { flex: none; display: grid; place-items: center; padding: 12px 16px; font-size: var(--fs-tiny); letter-spacing: .3em; color: #000; background: var(--warn); }
+.sec-roast .roast-ticker-viewport { flex: 1; overflow: hidden; display: flex; align-items: center; -webkit-mask: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); mask: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
+.sec-roast .roast-ticker-track { --ticker-dur: 40s; display: inline-flex; align-items: center; gap: 28px; white-space: nowrap; padding: 12px 0; font-size: var(--fs-small); color: var(--fg-2); animation: roast-ticker var(--ticker-dur) linear infinite; will-change: transform; }
+.sec-roast .roast-ticker:hover .roast-ticker-track { animation-play-state: paused; }
+.sec-roast .roast-ticker-sep { color: var(--red); }
+@keyframes roast-ticker { to { transform: translateX(-50%); } }
+html.reduced .sec-roast .roast-ticker-track { animation: none; white-space: normal; flex-wrap: wrap; padding: 12px 16px; }
+html.reduced .sec-roast .roast-ticker-track > :nth-child(n+17) { display: none; }
+html.reduced .sec-roast .roast-fire.is-loading { animation: none; }
+html.reduced .sec-roast .roast-stamp { opacity: .92; }
+
+/* responsive */
+@media (max-width: 1024px) { .sec-roast .roast-console { grid-template-columns: minmax(280px, 340px) 1fr; } }
+@media (max-width: 860px) {
+  .sec-roast .roast-console { grid-template-columns: 1fr; }
+  .sec-roast .roast-display { order: -1; }
+  .sec-roast .roast-screen { min-height: 260px; }
+}
+@media (max-width: 480px) {
+  .sec-roast .roast-dials { grid-template-columns: 1fr 1fr; }
+  .sec-roast .roast-part { grid-template-columns: 1fr; gap: 4px; }
+  .sec-roast .roast-part-kind { justify-self: start; }
+  .sec-roast .roast-counters { grid-template-columns: 1fr; }
+  .sec-roast .roast-stamp { right: 10px; bottom: 10px; }
+  .sec-roast .roast-topic-readout { margin-left: 0; width: 100%; }
+  .sec-roast .roast-ticker-tag { padding: 10px; writing-mode: vertical-rl; letter-spacing: .2em; }
+}

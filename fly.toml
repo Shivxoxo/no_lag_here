@@ -1,0 +1,28 @@
+# Fly.io config — `fly launch --copy-config` then `fly volumes create sir_data --size 1` and `fly secrets set ADMIN_PASSWORD=...`
+app = "sir-archives"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  DATABASE_PATH = "/data/sir-archives.db"
+
+[[mounts]]
+  source = "sir_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  method = "GET"
+  path = "/api/health"

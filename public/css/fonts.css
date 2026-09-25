@@ -1,0 +1,4 @@
+/* Self-hosted fonts (latin subsets, variable where available) — no external requests */
+@font-face { font-family: 'Bebas Neue'; font-style: normal; font-weight: 400; font-display: swap; src: url(../assets/fonts/bebas-neue-400.woff2) format('woff2'); }
+@font-face { font-family: 'Space Grotesk'; font-style: normal; font-weight: 300 700; font-display: swap; src: url(../assets/fonts/space-grotesk-variable.woff2) format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap; src: url(../assets/fonts/jetbrains-mono-variable.woff2) format('woff2'); }

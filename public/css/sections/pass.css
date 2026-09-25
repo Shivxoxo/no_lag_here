@@ -1,0 +1,100 @@
+/* 04 · THE PERFECT PASS — VAR replay / broadcast slow-mo */
+.sec-pass { --accent: var(--pitch); --accent-rgb: 46, 229, 107; color: var(--fg);
+  background: radial-gradient(ellipse 70% 50% at 50% 35%, rgba(46,229,107,.09), transparent 70%), linear-gradient(180deg, #02060a 0%, #04120a 40%, #030a06 100%);
+  padding-top: calc(var(--sec-pad) + 30px); padding-bottom: calc(var(--sec-pad) + 30px); }
+.sec-pass .pass-bar { position: absolute; left: 0; right: 0; height: clamp(18px, 4vh, 40px); background: #000; z-index: 3; pointer-events: none; }
+.sec-pass .pass-bar-top { top: 0; box-shadow: 0 6px 30px rgba(0,0,0,.7); }
+.sec-pass .pass-bar-bot { bottom: 0; box-shadow: 0 -6px 30px rgba(0,0,0,.7); }
+.sec-pass .pass-scan { position: absolute; inset: 0; z-index: 2; pointer-events: none; opacity: .35;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.35) 0 2px, transparent 2px 5px); mix-blend-mode: multiply; }
+.sec-pass .pass-vignette { position: absolute; inset: 0; z-index: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,.75) 100%); }
+.sec-pass .pass-wrap { z-index: 1; }
+
+/* broadcast HUD */
+.sec-pass .pass-hud { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; font-size: var(--fs-tiny); letter-spacing: .22em; color: var(--fg-2); margin-bottom: clamp(22px, 4vh, 40px); }
+.sec-pass .pass-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid rgba(255,59,59,.55); border-radius: 4px; color: #fff; background: rgba(255,59,59,.12); }
+.sec-pass .pass-rec { width: 9px; height: 9px; border-radius: 50%; background: var(--red); box-shadow: 0 0 12px var(--red); animation: pass-rec 1.2s steps(2, start) infinite; }
+@keyframes pass-rec { to { visibility: hidden; } }
+.sec-pass .pass-tc { font-size: clamp(1rem, 2vw, 1.4rem); letter-spacing: .12em; color: #fff; font-weight: 600; }
+.sec-pass .pass-cam { margin-left: auto; color: var(--muted); }
+.sec-pass .pass-title { color: #fff; text-shadow: 0 0 60px rgba(46,229,107,.25); }
+
+/* vertical sequence */
+.sec-pass .pass-seq { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; margin: clamp(24px, 6vh, 60px) 0; }
+.sec-pass .pass-seq-item { font-size: clamp(2.6rem, 8vw, 7.5rem); color: var(--fg-2); letter-spacing: .04em; line-height: .95; }
+.sec-pass .pass-seq-pass { color: var(--pitch); text-shadow: 0 0 40px rgba(46,229,107,.45); }
+.sec-pass .pass-seq-x { font-size: clamp(3rem, 9vw, 8rem); filter: drop-shadow(0 0 30px rgba(255,59,59,.6)); }
+.sec-pass .pass-seq-arrow { font-size: clamp(1.6rem, 4vw, 3rem); color: var(--muted); line-height: 1; font-family: var(--font-display); }
+
+/* display lines */
+.sec-pass .pass-lines { text-align: center; margin: clamp(30px, 8vh, 90px) 0; display: grid; gap: 10px; }
+.sec-pass .pass-line { line-height: .95; }
+.sec-pass .pass-line-1 { font-size: clamp(2rem, 5.5vw, 5rem); color: var(--fg-2); letter-spacing: .06em; }
+.sec-pass .pass-line-2 { font-size: clamp(2.8rem, 8.5vw, 8rem); color: #fff; text-shadow: 0 0 50px rgba(255,59,59,.35); }
+.sec-pass .pass-line-2 { will-change: transform, filter; }
+
+/* stage */
+.sec-pass .pass-stage { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, .8fr); gap: clamp(16px, 2.5vw, 32px); align-items: stretch; margin-top: clamp(20px, 4vh, 40px); }
+.sec-pass .pass-pitch-wrap { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid rgba(46,229,107,.25); box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 0 80px rgba(0,0,0,.5); background: #062314; }
+.sec-pass .pass-pitch { width: 100%; height: auto; display: block; }
+.sec-pass .pass-pitch-hud { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; padding: 10px 14px; font-size: var(--fs-tiny); letter-spacing: .2em; color: rgba(255,255,255,.7); pointer-events: none; z-index: 2; text-shadow: 0 1px 2px #000; }
+.sec-pass .pass-pitch-hud span:first-child { color: var(--red); }
+.sec-pass .fig-shadow { fill: rgba(0,0,0,.4); }
+.sec-pass .fig-body { stroke: rgba(0,0,0,.5); stroke-width: 1.5; }
+.sec-pass .fig-body-passer { fill: #38e8ff; }
+.sec-pass .fig-body-sir { fill: #ff3d8f; }
+.sec-pass .fig-head { fill: #f2d3b3; stroke: rgba(0,0,0,.45); stroke-width: 1.5; }
+.sec-pass .fig-gaze { fill: #111; }
+.sec-pass .fig-num { font-size: 22px; fill: #000; opacity: .75; }
+.sec-pass .fig-name { font-size: 15px; font-weight: 700; letter-spacing: .12em; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,.6); stroke-width: 3px; }
+.sec-pass .fig-bubble { font-size: 34px; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,.6); stroke-width: 3px; }
+.sec-pass .pass-ball { will-change: transform; }
+
+/* glitch overlay */
+.sec-pass .pass-glitch { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; text-align: center; padding: 20px; color: #fff;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.25) 0 3px, transparent 3px 6px), rgba(200, 20, 30, .92); backdrop-filter: blur(2px); }
+.sec-pass .pass-glitch.is-on { animation: pass-glitch-bg .18s steps(2) infinite; }
+@keyframes pass-glitch-bg { 50% { background-position: 0 3px, 0 0; filter: hue-rotate(-15deg) contrast(1.2); } }
+.sec-pass .pass-glitch-inner { display: grid; gap: 12px; max-width: 30ch; }
+.sec-pass .pass-glitch-title { position: relative; font-size: clamp(1.7rem, 4.6vw, 3.6rem); line-height: .95; letter-spacing: .04em; }
+.sec-pass .pass-glitch.is-on .pass-glitch-title::before, .sec-pass .pass-glitch.is-on .pass-glitch-title::after { content: attr(data-text); position: absolute; inset: 0; opacity: .8; }
+.sec-pass .pass-glitch.is-on .pass-glitch-title::before { color: #38e8ff; animation: pass-glitch-a .32s steps(2) infinite; clip-path: inset(0 0 55% 0); }
+.sec-pass .pass-glitch.is-on .pass-glitch-title::after { color: #ffcc4d; animation: pass-glitch-b .27s steps(2) infinite; clip-path: inset(50% 0 0 0); }
+@keyframes pass-glitch-a { 0% { transform: translate(-4px, -2px); } 50% { transform: translate(4px, 1px); } 100% { transform: translate(-2px, 2px); } }
+@keyframes pass-glitch-b { 0% { transform: translate(3px, 2px); } 50% { transform: translate(-3px, -1px); } 100% { transform: translate(2px, -2px); } }
+.sec-pass .pass-glitch-sub { font-size: var(--fs-small); letter-spacing: .3em; }
+.sec-pass .pass-dots::after { content: '…'; animation: pass-dots 1s steps(4, end) infinite; }
+@keyframes pass-dots { 0% { content: ''; } 33% { content: '.'; } 66% { content: '..'; } 100% { content: '…'; } }
+.sec-pass .pass-glitch-log { font-size: var(--fs-tiny); color: rgba(255,255,255,.75); text-align: left; min-height: 5.5em; line-height: 1.5; margin-inline: auto; }
+
+/* side panel */
+.sec-pass .pass-panel { display: flex; flex-direction: column; gap: 16px; padding: clamp(18px, 2.4vw, 28px); border-color: rgba(46,229,107,.2); }
+.sec-pass .pass-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-tiny); letter-spacing: .18em; color: var(--muted); }
+.sec-pass .pass-passer-label b { color: var(--pitch); }
+.sec-pass .pass-result { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: var(--radius-sm); background: rgba(0,0,0,.45); border: 1px solid var(--line); min-height: 190px; position: relative; overflow: hidden; }
+.sec-pass .pass-result.is-ok { border-color: rgba(46,229,107,.5); box-shadow: inset 0 0 40px rgba(46,229,107,.12); }
+.sec-pass .pass-result-n { font-size: var(--fs-tiny); letter-spacing: .22em; color: var(--muted); }
+.sec-pass .pass-result-text { font-size: clamp(1.7rem, 3.4vw, 2.6rem); line-height: .95; color: #fff; text-transform: none; }
+.sec-pass .pass-result-stamp { margin-top: auto; display: flex; justify-content: flex-end; }
+.sec-pass .pass-stamp { font-size: clamp(1.1rem, 2vw, 1.6rem); transform-origin: center; }
+.sec-pass .pass-stamp-ok { color: var(--pitch); text-shadow: 0 0 20px rgba(46,229,107,.4); }
+.sec-pass .pass-counter { font-size: var(--fs-small); letter-spacing: .1em; color: var(--fg-2); line-height: 1.6; }
+.sec-pass .pass-counter b { color: #fff; }
+.sec-pass .pass-well { color: var(--muted); font-size: var(--fs-tiny); letter-spacing: .02em; }
+.sec-pass .pass-play { width: 100%; }
+.sec-pass .pass-note { font-size: var(--fs-tiny); letter-spacing: .08em; margin: 0; }
+
+@media (max-width: 900px) {
+  .sec-pass .pass-stage { grid-template-columns: 1fr; }
+  .sec-pass .pass-result { min-height: 150px; }
+}
+@media (max-width: 640px) {
+  .sec-pass .pass-hud { gap: 8px 14px; }
+  .sec-pass .pass-cam { margin-left: 0; width: 100%; }
+  .sec-pass .pass-seq-item { font-size: clamp(2.4rem, 12vw, 4rem); }
+  .sec-pass .pass-line-1 { font-size: clamp(1.7rem, 7.5vw, 3rem); }
+  .sec-pass .pass-line-2 { font-size: clamp(2.2rem, 10.5vw, 4rem); }
+  .sec-pass .pass-pitch-hud { font-size: .6rem; padding: 8px 10px; }
+  .sec-pass .fig-name { font-size: 18px; }
+}
+html.reduced .sec-pass .pass-rec, html.reduced .sec-pass .pass-glitch.is-on { animation: none; }
