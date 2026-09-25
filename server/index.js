@@ -62,7 +62,9 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'No such endpoint. L
 // Static frontend
 app.use(express.static(PUBLIC_DIR, {
   maxAge: PROD ? '7d' : 0,
-  setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache'); },
+  // HTML, JS and CSS always revalidate (ETag) so every deploy shows up on a normal refresh;
+  // photos, fonts and vendor libs keep the long cache.
+  setHeaders: (res, filePath) => { if (/\.(html|js|css)$/.test(filePath)) res.set('Cache-Control', 'no-cache'); },
 }));
 app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin', 'index.html')));
 app.get('*', (req, res) => {
