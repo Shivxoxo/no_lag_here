@@ -1,22 +1,26 @@
-# Render.com blueprint — one web service with a persistent disk for SQLite.
+# Render.com blueprint — FREE plan, zero edits needed.
+# Note: on the free plan the site sleeps after 15 min idle (first load takes ~30-60 s)
+# and messages/scores reset when it restarts. To keep data + no sleeping, switch to
+# plan: starter and uncomment the disk block below.
 services:
   - type: web
     name: sir-archives
     runtime: node
-    plan: starter            # needs a paid plan for the persistent disk; free tier works without it (DB resets on deploy)
+    plan: free
     buildCommand: npm ci --omit=dev
     startCommand: node server/index.js
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_PATH
-        value: /var/data/sir-archives.db
       - key: ADMIN_PASSWORD
-        sync: false          # set in the Render dashboard
+        sync: false          # you type this in the Render dashboard
       - key: SESSION_SECRET
         generateValue: true
-    disk:
-      name: sir-data
-      mountPath: /var/data
-      sizeGB: 1
+    # Paid plan (starter, ~$7/mo): persistent database + no sleeping
+    # plan: starter
+    # disk:
+    #   name: sir-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # and add envVar: DATABASE_PATH=/var/data/sir-archives.db
