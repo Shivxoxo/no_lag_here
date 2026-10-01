@@ -1,0 +1,89 @@
+/* ===== Julius Caesar Act 1 Master Course — print stylesheet ===== */
+:root{
+  --ink:#1f2328; --muted:#5b6470; --rule:#d5d9df;
+  --roman:#8b1e2d; --roman-light:#f7e9eb; --gold:#a8791a; --gold-light:#fbf4e3;
+  --slate:#2f3e46; --slate-light:#eef2f4; --olive:#4c6b3c; --olive-light:#eef4ea;
+  --ink-blue:#2b4c7e; --blue-light:#e9eff8; --plum:#5d3a6b; --plum-light:#f2ebf6;
+  --sand:#fbf7ef; --red-weak:#fdeeee; --green-strong:#eaf5ec;
+}
+@page { size: A4; margin: 17mm 0 16mm 0; }
+html{ font-size: 10.6pt; }
+body{ font-family: "Liberation Serif","DejaVu Serif","Times New Roman",serif; color:var(--ink); line-height:1.48; margin:0; padding:0; }
+section.chapter, nav.toc, section.titlepage { padding: 0 0 0 0; }
+h1,h2,h3,h4{ font-family:"Liberation Sans","DejaVu Sans",Arial,sans-serif; color:var(--slate); line-height:1.2; margin:1.1em 0 .45em; break-after:avoid; page-break-after:avoid; }
+h2{ font-size:1.42em; color:var(--roman); border-bottom:2px solid var(--roman); padding-bottom:.18em; margin-top:1.6em; }
+h3{ font-size:1.12em; color:var(--slate); margin-top:1.25em; }
+h4{ font-size:1em; color:var(--ink-blue); margin-top:1em; text-transform:uppercase; letter-spacing:.03em; font-size:.86em; }
+p{ margin:.42em 0 .62em; text-align:left; orphans:3; widows:3; }
+p:first-child{ margin-top:0 }
+em{ font-style:italic } strong{ color:#111; }
+ul,ol{ margin:.35em 0 .7em 1.25em; padding-left:.6em; }
+li{ margin:.18em 0; }
+li > p{ margin:.15em 0; }
+hr{ border:0; border-top:1px solid var(--rule); margin:1.2em 0; }
+blockquote{ margin:.6em 0 .8em .6em; padding:.35em .9em .35em .9em; border-left:3px solid var(--gold); background:var(--gold-light); font-style:italic; color:#2a2a2a; break-inside:avoid; }
+blockquote p{ margin:.2em 0; }
+blockquote strong{ font-style:normal; color:var(--roman); }
+code{ font-family:"Liberation Mono","DejaVu Sans Mono",monospace; font-size:.9em; background:#f3f4f6; padding:0 .25em; border-radius:2px; }
+pre{ background:#f6f7f9; border:1px solid var(--rule); padding:.6em .8em; font-size:.86em; white-space:pre-wrap; break-inside:avoid; }
+/* tables */
+table{ border-collapse:collapse; width:100%; margin:.7em 0 1em; font-size:.9em; line-height:1.35; break-inside:auto; }
+thead{ display:table-header-group; }
+tr{ break-inside:avoid; page-break-inside:avoid; }
+th{ background:var(--slate); color:#fff; font-family:"Liberation Sans","DejaVu Sans",sans-serif; font-weight:600; text-align:left; padding:.38em .5em; font-size:.92em; vertical-align:bottom; }
+td{ border-bottom:1px solid var(--rule); padding:.36em .5em; vertical-align:top; }
+tbody tr:nth-child(even) td{ background:#fafbfc; }
+/* boxes */
+.box{ border:1px solid var(--rule); border-left-width:5px; border-radius:4px; padding:.55em .9em .6em; margin:1em 0 1.1em; background:#fff; break-inside:avoid; page-break-inside:avoid; }
+.box > .box-head{ font-family:"Liberation Sans","DejaVu Sans",sans-serif; margin:0 0 .4em; display:flex; gap:.6em; align-items:baseline; flex-wrap:wrap; }
+.box-label{ font-size:.72em; font-weight:700; letter-spacing:.09em; text-transform:uppercase; padding:.12em .5em; border-radius:2px; color:#fff; background:var(--slate); }
+.box-title{ font-weight:700; font-size:.98em; color:var(--slate); }
+.box p{ margin:.3em 0 .5em; } .box p:last-child{ margin-bottom:.1em }
+.box-insight{ background:var(--sand); border-left-color:var(--gold); } .box-insight .box-label{ background:var(--gold); }
+.box-quote{ background:var(--gold-light); border-left-color:var(--gold); } .box-quote .box-label{ background:var(--gold); }
+.box-keyword{ background:var(--blue-light); border-left-color:var(--ink-blue); } .box-keyword .box-label{ background:var(--ink-blue); }
+.box-history{ background:var(--olive-light); border-left-color:var(--olive); } .box-history .box-label{ background:var(--olive); }
+.box-icse{ background:var(--roman-light); border-left-color:var(--roman); } .box-icse .box-label{ background:var(--roman); }
+.box-crossref{ background:var(--slate-light); border-left-color:var(--slate); } .box-crossref .box-label{ background:var(--slate); }
+.box-revision{ background:var(--plum-light); border-left-color:var(--plum); } .box-revision .box-label{ background:var(--plum); }
+.box-textnote{ background:#f7f7f7; border-left-color:#888; } .box-textnote .box-label{ background:#777; }
+.box-weak{ background:var(--red-weak); border-left-color:#b23a3a; } .box-weak .box-label{ background:#b23a3a; }
+.box-strong{ background:var(--green-strong); border-left-color:#2e7d4f; } .box-strong .box-label{ background:#2e7d4f; }
+.box-model{ background:var(--green-strong); border-left-color:#2e7d4f; } .box-model .box-label{ background:#2e7d4f; }
+.box-level{ background:#fff; border-left-color:var(--ink-blue); } .box-level .box-label{ display:none } .box-level .box-title{ color:var(--ink-blue); font-size:1.02em; }
+.box-question{ background:#fff; border-left-color:var(--plum); } .box-question .box-label{ background:var(--plum); }
+.box-extract{ background:var(--gold-light); border-left-color:var(--gold); } .box-extract .box-label{ background:var(--gold); }
+.box blockquote{ background:rgba(255,255,255,.7); }
+/* chain diagrams */
+.chain{ margin:.8em auto 1em; max-width:78%; text-align:center; font-family:"Liberation Sans","DejaVu Sans",sans-serif; font-size:.9em; break-inside:avoid; }
+.chain-step{ border:1px solid var(--slate); border-radius:4px; padding:.35em .7em; background:var(--slate-light); color:var(--slate); }
+.chain-arrow{ color:var(--roman); font-size:1.15em; line-height:1.1; padding:.1em 0; }
+/* title page */
+section.titlepage{ min-height:250mm; box-sizing:border-box; padding:30mm 26mm 20mm; display:flex; flex-direction:column; justify-content:center; text-align:center; page-break-after:always; break-after:page; background:#fff; }
+.tp-rule{ height:3px; background:var(--roman); margin:0 auto 18mm; width:60%; }
+.tp-kicker{ font-family:"Liberation Sans","DejaVu Sans",sans-serif; letter-spacing:.32em; font-size:.85em; color:var(--gold); font-weight:700; }
+.tp-title{ font-size:3.6em; letter-spacing:.06em; margin:.25em 0 .1em; color:var(--roman); font-weight:800; }
+.tp-sub{ font-family:"Liberation Sans","DejaVu Sans",sans-serif; font-size:1.35em; color:var(--slate); margin-bottom:1.2em; }
+.tp-desc{ font-style:italic; color:var(--muted); max-width:80%; margin:0 auto 14mm; line-height:1.5; }
+.tp-meta{ font-family:"Liberation Sans","DejaVu Sans",sans-serif; font-size:.86em; color:var(--muted); line-height:1.6; margin-top:12mm; }
+.tp-small{ display:block; margin-top:.8em; font-size:.92em; }
+/* TOC */
+nav.toc{ padding:22mm 22mm 10mm; page-break-after:always; break-after:page; }
+nav.toc h1{ color:var(--roman); border-bottom:3px solid var(--roman); padding-bottom:.2em; font-size:2em; }
+.toc-ch{ margin-top:.9em; font-family:"Liberation Sans","DejaVu Sans",sans-serif; font-weight:700; font-size:1em; color:var(--slate); }
+.toc-sec{ font-size:.9em; margin-left:1.6em; color:var(--ink); }
+.toc-ch a,.toc-sec a{ display:flex; text-decoration:none; color:inherit; align-items:baseline; gap:.5em; }
+.toc-num{ color:var(--roman); min-width:6.5em; }
+.toc-title{ flex:1; border-bottom:1px dotted var(--rule); }
+.toc-page{ min-width:2.5em; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); }
+/* chapters */
+section.chapter{ padding:0 22mm 14mm; page-break-before:always; break-before:page; }
+.ch-divider{ margin:0 -22mm 10mm; padding:30mm 22mm 12mm; background:linear-gradient(180deg,var(--slate) 0%,#3c4f58 100%); color:#fff; page-break-inside:avoid; }
+.ch-label{ font-family:"Liberation Sans","DejaVu Sans",sans-serif; letter-spacing:.3em; font-size:.8em; color:#e8c872; font-weight:700; }
+.ch-title{ color:#fff; font-size:2.1em; margin:.3em 0 0; letter-spacing:.01em; }
+section.chapter > p:first-of-type em{ color:var(--muted); }
+/* misc */
+.small{ font-size:.86em; color:var(--muted); }
+sup{ font-size:.7em }
+img{ max-width:100% }
+@media print { a{ color:inherit; text-decoration:none } }
